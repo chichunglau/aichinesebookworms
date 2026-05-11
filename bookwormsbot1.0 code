@@ -1,0 +1,1282 @@
+/**
+ * TBCL Chinese Analysis Tool - Google Apps Script Backend
+ * Integrated with Gemini 2.5 Flash (Stable) and Google Drive
+ */
+
+// Global constant for Gemini API (The environment provides the key at runtime)
+const API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || "AIzaSyAmlVuNzvB8wbaYKw8Ufd7Xadsa3Qu6o0k"; 
+
+// Google Drive Folder ID provided
+const FOLDER_ID = "1UvO24jV8zycT-pYw4OGA9tPlcMZjmHpg";
+
+// 官方TOCFL/TBCL等级标准定义
+const LANGUAGE_LEVEL_STANDARDS = {
+  "P": {
+    name: "TBCL P (Prep)",
+    vocabulary: "约500词",
+    grammar: "简单句子，无复杂语法",
+    features: "日常话题，基本问候和自我介绍",
+    description: "能理解并运用与个人生活相关的简单字词。包含246个汉字、396个词语、6个类词缀、15个语法点。"
+  },
+  "1": {
+    name: "TBCL 1 (Novice 1)",
+    vocabulary: "约1000词",
+    grammar: "基本句子结构，简单语法模式",
+    features: "能听懂简单的数量名称，能读懂个人相关的简单字词",
+    description: "能理解并运用与个人生活相关的简单字词。能听懂简单的数量名称（数字、价钱、时间）。"
+  },
+  "2": {
+    name: "TBCL 2 (Novice 2)",
+    vocabulary: "约2000词",
+    grammar: "更复杂的句子，基本语法结构",
+    features: "能理解与个人及日常生活有关的字词、短语及短句",
+    description: "能理解与个人及日常生活有关的字词、短语及短句。能运用简单字词与句子与他人交流。"
+  },
+  "2+": {
+    name: "TBCL 2+ (A1)",
+    vocabulary: "约3000词",
+    grammar: "基本语法结构，简单句子组合",
+    features: "能处理简单会话话题，基本段落形成",
+    description: "能在语速缓慢、内容清晰的情况下，听懂对话、指示、视听媒体之简单字词、短语及短句。"
+  },
+  "3": {
+    name: "TBCL 3 (A1-A2)",
+    vocabulary: "4000-5000词",
+    grammar: "改进的句子复杂性，能表达个人观点",
+    features: "一般的社会生活能力，能描述个人兴趣爱好",
+    description: "能理解日常生活中的简单对话和描述，能以简单句子表达个人想法和感受。"
+  },
+  "3+": {
+    name: "TBCL 3+ (A2)",
+    vocabulary: "6000-7000词",
+    grammar: "更复杂的句子结构，能叙述和描述",
+    features: "能理解日常生活中的大部分对话，能进行简单的叙述",
+    description: "能理解日常生活中的大部分对话和描述，能进行简单的叙述和描述。"
+  },
+  "4": {
+    name: "TBCL 4 (B1)",
+    vocabulary: "8000-10000词",
+    grammar: "复杂语法，连贯段落结构",
+    features: "能讨论抽象话题，连贯的段落结构",
+    description: "能理解一般社会生活中的对话和文章，能以连贯的方式表达个人观点和叙述经历。"
+  },
+  "5": {
+    name: "TBCL 5 (B2)",
+    vocabulary: "12000-15000词",
+    grammar: "复杂语法结构，逻辑组织",
+    features: "能辩论和说服，逻辑组织能力",
+    description: "能理解复杂的文章和对话，能以清晰、有条理的方式表达和论证观点。"
+  },
+  "6": {
+    name: "TBCL 6 (C1)",
+    vocabulary: "18000-22000词",
+    grammar: "高级语法结构，复杂句子组合",
+    features: "能理解多样主题所表达的观点及隐含意义",
+    description: "不论场域，能理解不同形式、多样主题篇章的观点及隐含的意义。能以书面语及结构完整的篇章，精确表达观点、摘要、评论或创作。"
+  },
+  "7": {
+    name: "TBCL 7 (C2)",
+    vocabulary: "25000+词",
+    grammar: "高度复杂语法，文学表达",
+    features: "能理解各种复杂文本，能进行高级学术写作",
+    description: "能完全理解各种复杂文本和对话，包括专业和学术内容，能进行高级学术写作和复杂的论证。"
+  },
+  "A1": {
+    name: "TOCFL A1 (入门级)",
+    vocabulary: "约500-1000词",
+    grammar: "基本语法结构",
+    features: "基础中的基础，能进行简单问候和自我介绍",
+    description: "能理解并使用简单的词语和句子，进行基本的日常交流。"
+  },
+  "A2": {
+    name: "TOCFL A2 (基础级)",
+    vocabulary: "约1000-2500词",
+    grammar: "基本语法结构，简单句子组合",
+    features: "日常会话水平，能进行实用的日常会话",
+    description: "能在日常生活场景中进行基本的交流，理解简单的指令和信息。"
+  },
+  "B1": {
+    name: "TOCFL B1 (进阶级)",
+    vocabulary: "约2500-4000词",
+    grammar: "复杂语法结构，连贯表达",
+    features: "一般的社会生活水平，能说明自己的兴趣事",
+    description: "能理解和表达与日常生活相关的主题，能进行简单的讨论和叙述。"
+  },
+  "B2": {
+    name: "TOCFL B2 (高阶级)",
+    vocabulary: "约4000-6000词",
+    grammar: "复杂语法结构，逻辑组织",
+    features: "能进行抽象话题讨论，能进行复杂的叙述",
+    description: "能理解和表达复杂的观点和想法，能进行深入的讨论和辩论。"
+  },
+  "C1": {
+    name: "TOCFL C1 (流利级)",
+    vocabulary: "约6000-8000词",
+    grammar: "高级语法结构，复杂句子组合",
+    features: "能理解多样主题所表达的观点及隐含意义",
+    description: "能理解和表达复杂的学术和专业内容，能进行高级的讨论和写作。"
+  },
+  "C2": {
+    name: "TOCFL C2 (精通级)",
+    vocabulary: "8000+词",
+    grammar: "高度复杂语法，文学表达",
+    features: "能理解各种复杂文本，能进行高级学术写作",
+    description: "能完全理解和表达各种复杂的学术和专业内容，包括高度专业化的领域。"
+  }
+};
+
+/**
+ * 加载词汇表数据
+ * @return {object} 词汇表数据
+ */
+function loadVocabularyData() {
+  try {
+    const vocabularyData = {
+      vocabulary: {},      // 词语表
+      grammar: {},         // 语法点
+      commonWords: [],     // 通用词
+      affixes: {},         // 类词缀
+      characters: {}       // 汉字表
+    };
+    
+    // 定义文件ID和名称映射
+    const fileMappings = {
+      vocabulary: {
+        id: '1wcSSTAHtzEqWrzDwNGHSz3BPgkxOAzV7',
+        name: '词语表.csv'
+      },
+      grammar: {
+        id: '1ttzFMUHOsptnRleUqcMnRmJLdMXgvpfA',
+        name: '语法点.csv'
+      },
+      commonWords: {
+        id: '19N19PNo5kutTO2wnFKO9O_uP_ZU-RBtq',
+        name: '通用词.csv'
+      },
+      affixes: {
+        id: '1cSjE8Nz8Ome4oA_BdLzg4YP4F9fE0WXg',
+        name: '类词缀.csv'
+      },
+      characters: {
+        id: '1EYxm3EibP_IDIOtw9s19YixRzL0slumb',
+        name: '汉字表.csv'
+      }
+    };
+    
+    // 加载每个文件
+    Object.keys(fileMappings).forEach(key => {
+      const fileInfo = fileMappings[key];
+      try {
+        // 尝试通过ID获取文件
+        let file;
+        try {
+          file = DriveApp.getFileById(fileInfo.id);
+        } catch (e) {
+          // 如果ID获取失败，尝试通过名称查找
+          const files = DriveApp.getFilesByName(fileInfo.name);
+          if (files.hasNext()) {
+            file = files.next();
+          } else {
+            throw new Error(`File not found: ${fileInfo.name}`);
+          }
+        }
+        
+        // 读取文件内容
+        const content = file.getBlob().getDataAsString('UTF-8');
+        const parsedData = parseCSV(content);
+        
+        // 根据文件类型处理数据
+        if (key === 'vocabulary') {
+          vocabularyData.vocabulary = parseVocabularyCSV(parsedData);
+        } else if (key === 'grammar') {
+          vocabularyData.grammar = parseGrammarCSV(parsedData);
+        } else if (key === 'commonWords') {
+          vocabularyData.commonWords = parseCommonWordsCSV(parsedData);
+        } else if (key === 'affixes') {
+          vocabularyData.affixes = parseAffixesCSV(parsedData);
+        } else if (key === 'characters') {
+          vocabularyData.characters = parseCharactersCSV(parsedData);
+        }
+        
+        console.log(`Successfully loaded ${key} data with ${getObjectSize(parsedData)} entries`);
+      } catch (fileError) {
+        console.error(`Error loading ${key}: ${fileError.message}`);
+        // 使用备份数据
+        vocabularyData[key] = getBackupData(key);
+      }
+    });
+    
+    return vocabularyData;
+  } catch (error) {
+    console.error('Error in loadVocabularyData:', error.message);
+    return getDefaultVocabularyData();
+  }
+}
+
+/**
+ * 解析CSV文件内容
+ * @param {string} csvContent - CSV文件内容
+ * @return {array} 解析后的数据数组
+ */
+function parseCSV(csvContent) {
+  try {
+    const lines = csvContent.split('\n');
+    const headers = lines[0].split(',').map(header => header.trim().replace(/"/g, ''));
+    const data = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      
+      const values = [];
+      let currentValue = '';
+      let inQuotes = false;
+      
+      for (let j = 0; j < line.length; j++) {
+        const char = line[j];
+        
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          values.push(currentValue.trim());
+          currentValue = '';
+        } else {
+          currentValue += char;
+        }
+      }
+      
+      values.push(currentValue.trim());
+      
+      if (values.length === headers.length) {
+        const row = {};
+        headers.forEach((header, index) => {
+          row[header] = values[index];
+        });
+        data.push(row);
+      }
+    }
+    
+    return data;
+  } catch (error) {
+    console.error('CSV parsing error:', error.message);
+    return [];
+  }
+}
+
+/**
+ * 解析词语表CSV
+ * @param {array} data - CSV数据
+ * @return {object} 词语表对象
+ */
+function parseVocabularyCSV(data) {
+  const vocabulary = {};
+  
+  data.forEach(row => {
+    const level = row['等级'] || row['level'] || row['Level'];
+    const word = row['词语'] || row['词汇'] || row['word'] || row['Word'];
+    
+    if (level && word) {
+      if (!vocabulary[level]) {
+        vocabulary[level] = [];
+      }
+      vocabulary[level].push(word.trim());
+    }
+  });
+  
+  return vocabulary;
+}
+
+/**
+ * 解析语法点CSV
+ * @param {array} data - CSV数据
+ * @return {object} 语法点对象
+ */
+function parseGrammarCSV(data) {
+  const grammar = {};
+  
+  data.forEach(row => {
+    const level = row['等级'] || row['level'] || row['Level'];
+    const grammarPoint = row['语法点'] || row['语法'] || row['grammar'] || row['Grammar'];
+    
+    if (level && grammarPoint) {
+      if (!grammar[level]) {
+        grammar[level] = [];
+      }
+      grammar[level].push(grammarPoint.trim());
+    }
+  });
+  
+  return grammar;
+}
+
+/**
+ * 解析通用词CSV
+ * @param {array} data - CSV数据
+ * @return {array} 通用词数组
+ */
+function parseCommonWordsCSV(data) {
+  const commonWords = [];
+  
+  data.forEach(row => {
+    const word = row['通用词'] || row['词'] || row['word'] || row['Word'];
+    if (word) {
+      commonWords.push(word.trim());
+    }
+  });
+  
+  return commonWords;
+}
+
+/**
+ * 解析类词缀CSV
+ * @param {array} data - CSV数据
+ * @return {object} 类词缀对象
+ */
+function parseAffixesCSV(data) {
+  const affixes = {};
+  
+  data.forEach(row => {
+    const level = row['等级'] || row['level'] || row['Level'];
+    const affix = row['类词缀'] || row['词缀'] || row['affix'] || row['Affix'];
+    
+    if (level && affix) {
+      if (!affixes[level]) {
+        affixes[level] = [];
+      }
+      affixes[level].push(affix.trim());
+    }
+  });
+  
+  return affixes;
+}
+
+/**
+ * 解析汉字表CSV
+ * @param {array} data - CSV数据
+ * @return {object} 汉字表对象
+ */
+function parseCharactersCSV(data) {
+  const characters = {};
+  
+  data.forEach(row => {
+    const level = row['等级'] || row['level'] || row['Level'];
+    const character = row['汉字'] || row['字'] || row['character'] || row['Character'];
+    
+    if (level && character) {
+      if (!characters[level]) {
+        characters[level] = [];
+      }
+      characters[level].push(character.trim());
+    }
+  });
+  
+  return characters;
+}
+
+/**
+ * 构建词汇等级映射
+ * @param {object} vocabularyData - 词汇表数据
+ * @return {object} 词汇等级映射
+ */
+function buildWordLevelMap(vocabularyData) {
+  const wordLevelMap = {};
+  const levels = ["P", "1", "2", "3", "4", "5", "6", "7", "A1", "A2", "B1", "B2", "C1", "C2"];
+  
+  // 首先添加通用词 - 所有级别都可以使用
+  vocabularyData.commonWords.forEach(word => {
+    wordLevelMap[word] = "common";
+  });
+  
+  // 按等级添加词汇
+  levels.forEach(level => {
+    if (vocabularyData.vocabulary[level]) {
+      vocabularyData.vocabulary[level].forEach(word => {
+        if (!wordLevelMap[word]) {
+          wordLevelMap[word] = level;
+        }
+      });
+    }
+  });
+  
+  return wordLevelMap;
+}
+
+/**
+ * 获取词汇的最高等级
+ * @param {string} word - 词汇
+ * @param {object} vocabularyData - 词汇表数据
+ * @return {string} 最高等级
+ */
+function getWordMaxLevel(word, vocabularyData) {
+  const levels = ["P", "1", "2", "3", "4", "5", "6", "7", "A1", "A2", "B1", "B2", "C1", "C2"];
+  let maxLevel = null;
+  
+  levels.forEach(level => {
+    if (vocabularyData.vocabulary[level] && vocabularyData.vocabulary[level].includes(word)) {
+      maxLevel = level;
+    }
+  });
+  
+  return maxLevel;
+}
+
+/**
+ * 检查词汇是否符合目标等级
+ * @param {string} word - 词汇
+ * @param {string} targetLevel - 目标等级
+ * @param {object} vocabularyData - 词汇表数据
+ * @return {boolean} 是否符合
+ */
+function isWordLevelAppropriate(word, targetLevel, vocabularyData) {
+  // 通用词总是合适的
+  if (vocabularyData.commonWords.includes(word)) {
+    return true;
+  }
+  
+  const wordLevel = getWordMaxLevel(word, vocabularyData);
+  if (!wordLevel) {
+    return false; // 未知词汇
+  }
+  
+  // 转换为数字进行比较
+  const levelNumber = getLevelNumber(wordLevel);
+  const targetLevelNumber = getLevelNumber(targetLevel);
+  
+  return levelNumber <= targetLevelNumber;
+}
+
+/**
+ * 将等级转换为数字以便比较
+ * @param {string} level - 等级
+ * @return {number} 数字等级
+ */
+function getLevelNumber(level) {
+  const levelMap = {
+    "P": 0,
+    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
+    "A1": 1, "A2": 2,
+    "B1": 3, "B2": 4,
+    "C1": 5, "C2": 6
+  };
+  
+  return levelMap[level] || 999; // 未知等级设为很大的数
+}
+
+/**
+ * 获取对象大小
+ * @param {object} obj - 对象
+ * @return {number} 大小
+ */
+function getObjectSize(obj) {
+  if (Array.isArray(obj)) {
+    return obj.length;
+  } else if (typeof obj === 'object') {
+    return Object.keys(obj).length;
+  }
+  return 0;
+}
+
+/**
+ * 获取备份数据
+ * @param {string} dataType - 数据类型
+ * @return {object} 备份数据
+ */
+function getBackupData(dataType) {
+  const backupData = {
+    vocabulary: {
+      "P": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏"],
+      "1": ["科技", "發展", "電腦", "手機", "網絡", "信息", "數據", "軟件", "硬件", "系統"],
+      "2": ["人工智能", "機器學習", "深度學習", "數據分析", "大數據", "雲計算", "物聯網"],
+      "3": ["探索", "宇宙", "太空", "月球", "行星", "恆星", "星系", "黑洞"],
+      "4": ["法律", "國際", "外交", "挑戰", "經濟", "和平", "安全"],
+      "5": ["法律爭論", "私營企業", "國際公約", "約束", "強國競爭"],
+      "6": ["太空開拓", "深空探索", "採礦技術", "太空資源", "法律爭論"],
+      "7": ["太空開拓", "深空探索", "採礦技術", "太空資源", "法律爭論"]
+    },
+    grammar: {
+      "P": ["简单主谓句", "基本问候语", "简单疑问句"],
+      "1": ["复合主谓句", "复合疑问句", "因果复句"],
+      "2": ["转折复句", "递进复句", "并列复句"],
+      "3": ["选择复句", "假设复句", "条件复句"],
+      "4": ["让步复句", "目的复句", "时间复句"],
+      "5": ["复杂因果复句", "复杂转折复句", "复杂递进复句"],
+      "6": ["高级并列复句", "高级选择复句", "高级假设复句"],
+      "7": ["文学性复句", "修辞性复句", "学术性复句"]
+    },
+    commonWords: ["的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这"],
+    affixes: {
+      "P": ["的", "了", "着", "过", "不", "没"],
+      "1": ["化", "性", "者", "们", "头"],
+      "2": ["员", "家", "师", "生", "子"],
+      "3": ["主义", "思想", "理论", "方法", "学"],
+      "4": ["化", "性", "者", "们", "头", "员", "家", "师", "生", "子"],
+      "5": ["主义", "思想", "理论", "方法", "学"],
+      "6": ["主义", "思想", "理论", "方法", "学"],
+      "7": ["主义", "思想", "理论", "方法", "学"]
+    },
+    characters: {
+      "P": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月"],
+      "1": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏"],
+      "2": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏", "来", "去", "有", "无", "是", "非", "不", "了"],
+      "3": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏", "来", "去", "有", "无", "是", "非", "不", "了", "的", "和", "与", "或", "在", "到"],
+      "4": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏", "来", "去", "有", "无", "是", "非", "不", "了", "的", "和", "与", "或", "在", "到", "从", "向", "把", "被"],
+      "5": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏", "来", "去", "有", "无", "是", "非", "不", "了", "的", "和", "与", "或", "在", "到", "从", "向", "把", "被", "让", "给"],
+      "6": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏", "来", "去", "有", "无", "是", "非", "不", "了", "的", "和", "与", "或", "在", "到", "从", "向", "把", "被", "让", "给", "对", "为", "替"],
+      "7": ["一", "人", "大", "天", "上", "下", "中", "小", "日", "月", "水", "火", "土", "木", "金", "石", "多", "少", "好", "坏", "来", "去", "有", "无", "是", "非", "不", "了", "的", "和", "与", "或", "在", "到", "从", "向", "把", "被", "让", "给", "对", "为", "替", "由", "因", "果"]
+    }
+  };
+  
+  return backupData[dataType] || {};
+}
+
+/**
+ * 获取默认词汇数据
+ * @return {object} 默认词汇数据
+ */
+function getDefaultVocabularyData() {
+  return {
+    vocabulary: getBackupData('vocabulary'),
+    grammar: getBackupData('grammar'),
+    commonWords: getBackupData('commonWords'),
+    affixes: getBackupData('affixes'),
+    characters: getBackupData('characters')
+  };
+}
+
+/**
+ * 分析文本词汇等级
+ * @param {string} text - 要分析的文本
+ * @param {string} targetLevel - 目标等级
+ * @return {object} 分析结果
+ */
+function analyzeTextVocabulary(text, targetLevel) {
+  // 加载词汇数据
+  const vocabularyData = loadVocabularyData();
+  const wordLevelMap = buildWordLevelMap(vocabularyData);
+  
+  const words = text.match(/[\u4e00-\u9fff]+/g) || [];
+  const analysis = {
+    totalWords: words.length,
+    knownWords: 0,
+    unknownWords: 0,
+    levelWords: 0,
+    beyondWords: 0,
+    wordLevels: [],
+    unknownWordsList: [],
+    beyondWordsList: [],
+    levelDistribution: {}
+  };
+  
+  // 初始化等级分布
+  Object.keys(vocabularyData.vocabulary).forEach(level => {
+    analysis.levelDistribution[level] = 0;
+  });
+  analysis.levelDistribution['common'] = 0;
+  analysis.levelDistribution['unknown'] = 0;
+  
+  words.forEach(word => {
+    const level = wordLevelMap[word] || 'unknown';
+    analysis.wordLevels.push({word, level});
+    
+    if (level === 'unknown') {
+      analysis.unknownWords++;
+      analysis.unknownWordsList.push(word);
+      analysis.levelDistribution['unknown']++;
+    } else {
+      analysis.knownWords++;
+      analysis.levelDistribution[level]++;
+      
+      // 检查是否符合目标等级
+      if (level === 'common') {
+        analysis.levelWords++;
+      } else {
+        const levelNumber = getLevelNumber(level);
+        const targetLevelNumber = getLevelNumber(targetLevel);
+        
+        if (levelNumber <= targetLevelNumber) {
+          analysis.levelWords++;
+        } else {
+          analysis.beyondWords++;
+          analysis.beyondWordsList.push(word);
+        }
+      }
+    }
+  });
+  
+  // 计算百分比
+  analysis.levelPercentage = analysis.totalWords > 0 ? 
+    (analysis.levelWords / analysis.totalWords * 100).toFixed(1) : '0';
+  analysis.beyondPercentage = analysis.totalWords > 0 ? 
+    (analysis.beyondWords / analysis.totalWords * 100).toFixed(1) : '0';
+  analysis.unknownPercentage = analysis.totalWords > 0 ? 
+    (analysis.unknownWords / analysis.totalWords * 100).toFixed(1) : '0';
+  
+  // 检查是否符合95:5原则
+  analysis.meetsPrinciple = parseFloat(analysis.levelPercentage) >= 95;
+  
+  return analysis;
+}
+
+/**
+ * 检查95:5原则
+ * @param {string} text - 要检查的文本
+ * @param {string} targetLevel - 目标等级
+ * @return {object} 检查结果
+ */
+function check955Principle(text, targetLevel) {
+  const analysis = analyzeTextVocabulary(text, targetLevel);
+  
+  return {
+    knownWords: analysis.levelWords,
+    newWords: analysis.beyondWords,
+    knownPercentage: analysis.levelPercentage,
+    newPercentage: analysis.beyondPercentage,
+    meetsPrinciple: analysis.meetsPrinciple,
+    totalWords: analysis.totalWords,
+    analysis: analysis
+  };
+}
+
+/**
+ * 根据95:5原则调整文本
+ * @param {string} text - 要调整的文本
+ * @param {string} targetLevel - 目标等级
+ * @return {string} 调整后的文本
+ */
+function adjustTextBy955Principle(text, targetLevel) {
+  const analysis = analyzeTextVocabulary(text, targetLevel);
+  let adjustedText = text;
+  
+  // 如果已经符合95:5原则，直接返回
+  if (analysis.meetsPrinciple) {
+    return text;
+  }
+  
+  // 加载词汇数据
+  const vocabularyData = loadVocabularyData();
+  
+  // 替换超出等级的词汇
+  analysis.beyondWordsList.forEach(word => {
+    const replacement = findAppropriateReplacement(word, targetLevel, vocabularyData);
+    if (replacement) {
+      const regex = new RegExp(word, 'g');
+      adjustedText = adjustedText.replace(regex, replacement);
+    }
+  });
+  
+  // 确保95:5原则
+  const maxBeyondWords = Math.ceil(analysis.totalWords * 0.05);
+  
+  // 再次分析调整后的文本
+  const adjustedAnalysis = analyzeTextVocabulary(adjustedText, targetLevel);
+  
+  // 如果仍然不符合，进一步调整
+  if (!adjustedAnalysis.meetsPrinciple) {
+    // 简化句子结构
+    adjustedText = simplifySentenceStructure(adjustedText, targetLevel, vocabularyData);
+    
+    // 再次检查
+    const finalAnalysis = analyzeTextVocabulary(adjustedText, targetLevel);
+    if (!finalAnalysis.meetsPrinciple) {
+      // 最后手段：删除一些超出等级的词汇或句子
+      adjustedText = removeComplexElements(adjustedText, targetLevel, vocabularyData);
+    }
+  }
+  
+  return adjustedText;
+}
+
+/**
+ * 查找合适的替换词
+ * @param {string} complexWord - 复杂词汇
+ * @param {string} targetLevel - 目标等级
+ * @param {object} vocabularyData - 词汇表数据
+ * @return {string} 替换词
+ */
+function findAppropriateReplacement(complexWord, targetLevel, vocabularyData) {
+  // 词汇替换映射
+  const replacementMap = {
+    "科技發展": "科技進步",
+    "人類": "人們",
+    "腳步": "步伐",
+    "深空探索": "太空探索",
+    "採礦技術": "開採技術",
+    "太空開拓": "太空開發",
+    "資源": "東西",
+    "法律爭論": "法律問題",
+    "私營企業": "公司",
+    "國際公約": "國際規定",
+    "約束": "限制",
+    "強國競爭": "國家競爭",
+    "外交挑戰": "外交問題",
+    "經濟利益": "經濟好處",
+    "和平安全": "和平與安全",
+    "人工智能": "電腦技術",
+    "機器學習": "電腦學習",
+    "深度學習": "電腦學習",
+    "數據分析": "數據研究",
+    "大數據": "很多數據",
+    "雲計算": "網絡計算",
+    "物聯網": "網絡連接",
+    "探索": "尋找",
+    "宇宙": "天空",
+    "太空": "天空",
+    "月球": "月亮",
+    "行星": "星球",
+    "恆星": "星星",
+    "星系": "星星群",
+    "黑洞": "黑色的洞"
+  };
+  
+  // 检查是否有预定义的替换
+  if (replacementMap[complexWord]) {
+    return replacementMap[complexWord];
+  }
+  
+  // 尝试从目标等级或更低等级中找到同义词
+  const targetLevelNumber = getLevelNumber(targetLevel);
+  const levels = ["P", "1", "2", "3", "4", "5", "6", "7", "A1", "A2", "B1", "B2", "C1", "C2"];
+  
+  for (let i = 0; i < levels.length; i++) {
+    const level = levels[i];
+    if (getLevelNumber(level) <= targetLevelNumber && vocabularyData.vocabulary[level]) {
+      // 这里可以添加更复杂的同义词匹配逻辑
+      // 目前简单返回第一个找到的词汇
+      if (vocabularyData.vocabulary[level].length > 0) {
+        return vocabularyData.vocabulary[level][0];
+      }
+    }
+  }
+  
+  // 如果找不到替换词，返回原词
+  return null;
+}
+
+/**
+ * 简化句子结构
+ * @param {string} text - 要简化的文本
+ * @param {string} targetLevel - 目标等级
+ * @param {object} vocabularyData - 词汇表数据
+ * @return {string} 简化后的文本
+ */
+function simplifySentenceStructure(text, targetLevel, vocabularyData) {
+  // 简单的句子简化逻辑
+  let simplified = text;
+  
+  // 拆分复杂句子
+  simplified = simplified.replace(/，([^。！？]*?)(但是|然而|不過)([^。！？]*?)[。！？]/g, '。$1。$3。');
+  simplified = simplified.replace(/，([^。！？]*?)(因為|由於)([^。！？]*?)[。！？]/g, '。$1。$3。');
+  simplified = simplified.replace(/，([^。！？]*?)(所以|因此)([^。！？]*?)[。！？]/g, '。$1。$3。');
+  
+  // 缩短句子长度
+  const sentences = simplified.split(/[。！？]/);
+  const simplifiedSentences = sentences.map(sentence => {
+    if (sentence.length > 20) {
+      // 简单截断并添加句号
+      return sentence.substring(0, 20) + '。';
+    }
+    return sentence;
+  });
+  
+  return simplifiedSentences.join('');
+}
+
+/**
+ * 删除复杂元素
+ * @param {string} text - 要处理的文本
+ * @param {string} targetLevel - 目标等级
+ * @param {object} vocabularyData - 词汇表数据
+ * @return {string} 处理后的文本
+ */
+function removeComplexElements(text, targetLevel, vocabularyData) {
+  const words = text.match(/[\u4e00-\u9fff]+/g) || [];
+  let result = text;
+  
+  // 按照词汇长度排序，优先删除较长的词汇
+  const sortedWords = words.sort((a, b) => b.length - a.length);
+  
+  for (let i = 0; i < sortedWords.length; i++) {
+    const word = sortedWords[i];
+    if (!isWordLevelAppropriate(word, targetLevel, vocabularyData)) {
+      // 删除这个词汇
+      const regex = new RegExp(word, 'g');
+      result = result.replace(regex, '');
+      
+      // 检查是否已经符合95:5原则
+      const analysis = analyzeTextVocabulary(result, targetLevel);
+      if (analysis.meetsPrinciple) {
+        break;
+      }
+    }
+  }
+  
+  return result;
+}
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('index')
+      .setTitle('AI Chinese Bookworms Chatbot')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * Core function called from index.html
+ * Handles the logic for adapting Chinese text based on target levels.
+ * @param {string} message - User message or Chinese text to adapt.
+ * @param {string} level - Target TBCL/CEFR level (e.g., A1, B1).
+ */
+function getLevelStandards() {
+  return LANGUAGE_LEVEL_STANDARDS;
+}
+
+function getChatbotResponse(message, level) {
+  try {
+    // 添加输入验证和日志
+    console.log("Input message:", message);
+    console.log("Target level:", level);
+    
+    if (!message || message.trim() === '') {
+      return "請提供中文文本進行難度調整。";
+    }
+    
+    // 计算原始文本的句子数量
+    const sentenceCount = (message.match(/[。！？]/g) || []).length;
+    console.log("Original sentence count:", sentenceCount);
+    
+    // 获取Google Drive内容（如果有）
+    const driveData = getFolderContents();
+    const driveContext = driveData.length > 0 
+      ? driveData.map(f => `File: ${f.name}\nContent Preview: ${f.data.substring(0, 100)}...`).join("\n\n")
+      : "(未找到參考文件。)";
+    console.log("Drive context length:", driveContext.length);
+    
+    // 获取目标等级的官方标准描述
+    const levelStandard = LANGUAGE_LEVEL_STANDARDS[level] || {};
+    const levelDescription = levelStandard.description ? 
+      `\n\nOFFICIAL STANDARD FOR ${levelStandard.name}:\n${levelStandard.description}\n詞彙量: ${levelStandard.vocabulary}\n語法特點: ${levelStandard.grammar}` : '';
+
+    // 系統提示詞：強制使用繁體中文，並嚴格要求「只」輸出改寫後的文本
+    const systemPrompt = "You are an expert in Chinese language content adaptation (TBCL/TOCFL). Your goal is to rewrite the ENTIRE text to match a specific proficiency level while preserving ALL original meaning and details. You MUST respond in Traditional Chinese (繁體中文). Output ONLY the rewritten text without any additional conversational filler, titles, headings, notes, or follow-up questions.\n\nCRITICAL INSTRUCTION: Process the ENTIRE input text in one go. Do NOT process only part of the text or repeat the same content multiple times. Ensure the output has the same length and structure as the input.\n\nDO NOT OMIT ANY CONTENT: Under no circumstances should you omit, truncate, or shorten the original text. Every sentence, phrase, and detail must be preserved in the adapted version.\n\nOFFICIAL TBCL/TOCFL LEVEL STANDARDS:\nYou MUST strictly follow these official TBCL/TOCFL level standards from the Ministry of Education, Taiwan:\n\n- TBCL P (Prep): 約500詞，簡單句子，無複雜語法，日常話題，基本問候和自我介紹。能理解並運用與個人生活相關的簡單字詞。包含246個漢字、396個詞語、6個類詞綴、15個語法點。\n\n- TBCL 1 (Novice 1): 約1000詞，基本句子結構，簡單語法模式。能聽懂簡單的數量名稱，能讀懂個人相關的簡單字詞。能理解並運用與個人生活相關的簡單字詞。能聽懂簡單的數量名稱（數字、價錢、時間）。\n\n- TBCL 2 (Novice 2): 約2000詞，更複雜的句子，基本語法結構。能理解與個人及日常生活有關的字詞、短語及短句。能運用簡單字詞與句子與他人交流。包含258個漢字、402個詞語、7個類詞綴、92個語法點。\n\n- TBCL 2+ (A1): 約3000詞，基本語法結構，簡單句子組合。能處理簡單會話話題，基本段落形成。能在語速緩慢、內容清晰的情況下，聽懂對話、指示、視聽媒體之簡單字詞、短語及短句。\n\n- TBCL 3 (A1-A2): 4000-5000詞，改進的句子複雜性，能表達個人觀點。一般的社會生活能力，能描述個人興趣愛好。能理解日常生活中的簡單對話和描述，能以簡單句子表達個人想法和感受。\n\n- TBCL 3+ (A2): 6000-7000詞，更複雜的句子結構，能敘述和描述。能理解日常生活中的大部分對話，能進行簡單的敘述。能理解日常生活中的大部分對話和描述，能進行簡單的敘述和描述。\n\n- TBCL 4 (B1): 8000-10000詞，複雜語法，連貫段落結構。能討論抽象話題，連貫的段落結構。能理解一般社會生活中的對話和文章，能以連貫的方式表達個人觀點和敘述經歷。\n\n- TBCL 5 (B2): 12000-15000詞，複雜語法結構，邏輯組織。能辯論和說服，邏輯組織能力。能理解複雜的文章和對話，能以清晰、有條理的方式表達和論證觀點。\n\n- TBCL 6 (C1): 18000-22000詞，高級語法結構，複雜句子組合。能理解多樣主題所表達的觀點及隱含意義。不論場域，能理解不同形式、多樣主題篇章的觀點及隱含的意義。能以書面語及結構完整的篇章，精確表達觀點、摘要、評論或創作。包含600個漢字、4,144個詞語、4個類詞綴。\n\n- TBCL 7 (C2): 25000+詞，高度複雜語法，文學表達。能理解各種複雜文本，能進行高級學術寫作。能完全理解各種複雜文本和對話，包括專業和學術內容，能進行高級學術寫作和複雜的論證。\n\n- TOCFL A1 (入門級): 約500-1000詞，基本語法結構。基礎中的基礎，能進行簡單問候和自我介紹。能理解並使用簡單的詞語和句子，進行基本的日常交流。\n\n- TOCFL A2 (基礎級): 約1000-2500詞，基本語法結構，簡單句子組合。日常會話水平，能進行實用的日常會話。能在日常生活場景中進行基本的交流，理解簡單的指令和信息。\n\n- TOCFL B1 (進階級): 約2500-4000詞，複雜語法結構，連貫表達。一般的社會生活水平，能說明自己的興趣事。能理解和表達與日常生活相關的主題，能進行簡單的討論和敘述。\n\n- TOCFL B2 (高階級): 約4000-6000詞，複雜語法結構，邏輯組織。能進行抽象話題討論，能進行複雜的敘述。能理解和表達複雜的觀點和想法，能進行深入的討論和辯論。\n\n- TOCFL C1 (流利級): 約6000-8000詞，高級語法結構，複雜句子組合。能理解多樣主題所表達的觀點及隱含意義。能理解和表達複雜的學術和專業內容，能進行高級的討論和寫作。\n\n- TOCFL C2 (精通級): 8000+詞，高度複雜語法，文學表達。能理解各種複雜文本，能進行高級學術寫作。能完全理解和表達各種複雜的學術和專業內容，包括高度專業化的領域。\n\nYour adaptation MUST be strictly appropriate for the target level. Do NOT simply make minor changes - you must comprehensively transform the text to match the exact vocabulary range, grammatical complexity, and stylistic features specified in the official standards.";
+
+    let userPrompt = "";
+    const containsChinese = /[\u4e00-\u9fff]/.test(message);
+    
+    if (containsChinese) {
+      if (level) {
+        // 目標等級提示詞：移除三段式結構，要求純文本輸出
+        userPrompt = `Please COMPLETELY TRANSFORM the ENTIRE following Chinese text to strictly match TBCL/TOCFL Level ${level} standards:
+
+"""${message}"""
+
+Reference Context:
+${driveContext}
+
+CRITICAL REQUIREMENT:
+1. Output ONLY the rewritten text. Do not include any headings, notes, explanations, or conversational filler.
+2. You MUST maintain the original paragraph structure and sentence count (${sentenceCount} sentences).
+3. COMPLETELY REWRITE the text - do NOT just make minor changes or copy the original.
+4. Process ALL content and preserve ALL meaning while changing the language level.
+
+LEVEL TRANSFORMATION GUIDELINES:
+
+For LOWER levels (P, 1, 2, A1, A2):
+- REPLACE at least 50% of complex words with basic, common alternatives
+- BREAK DOWN complex sentences into simpler ones
+- REMOVE idioms, metaphors, and rhetorical devices
+- USE only basic grammatical structures appropriate for the level
+- LIMIT vocabulary to the specified range (P: ~500 words, 1: ~1000 words, 2: ~2000 words)
+- AVOID abstract concepts and complex reasoning
+
+For HIGHER levels (B1, B2, C1, C2):
+- REPLACE at least 40% of common words with more sophisticated alternatives
+- INTRODUCE complex sentence structures (因果复句, 转折复句, 递进复句, 并列复句)
+- ADD rhetorical devices (比喻, 拟人, 夸张, 对偶, 排比)
+- USE formal and academic expressions
+- ENHANCE logical connections between sentences
+- DEMONSTRATE variety in sentence structure and length
+
+SPECIFIC INSTRUCTIONS:
+- Do NOT simply change punctuation or make cosmetic changes
+- Do NOT keep the same vocabulary - you MUST replace words with level-appropriate alternatives
+- Do NOT maintain the same sentence structure - you MUST transform it according to the level
+- The transformation MUST be significant and clearly visible
+
+I will compare your output with the original text to verify that you have made substantial changes appropriate for TBCL/TOCFL Level ${level}.${levelDescription}`;
+
+        // 針對所有等級添加具體的難度調整指導和詞彙替換示例
+        if (['P', '1', '2', 'A1', 'A2'].includes(level)) {
+          userPrompt += `
+
+LOWER LEVEL SPECIFIC TRANSFORMATION GUIDE:
+
+VOCABULARY REPLACEMENT EXAMPLES:
+- 科技發展 → 科技進步/發展
+- 人類 → 人們/人
+- 腳步 → 步伐/前進
+- 深空探索 → 太空探索
+- 採礦技術 → 開採技術
+- 太空開拓 → 太空開發
+- 資源 → 資源/東西
+- 法律爭論 → 法律問題/討論
+- 私營企業 → 公司/企業
+- 國際公約 → 國際規定
+- 約束 → 限制
+- 強國競爭 → 國家競爭
+- 外交挑戰 → 外交問題
+- 經濟利益 → 經濟好處
+- 和平安全 → 和平與安全
+
+GRAMMAR SIMPLIFICATION EXAMPLES:
+- 將複雜句子拆分為簡單句
+- 移除連詞和過渡詞
+- 使用基本句型：主語 + 謂語 + 賓語
+- 避免使用修飾語和從句
+
+TRANSFORMATION REQUIREMENTS:
+1. SIMPLIFY vocabulary to level-appropriate range (P: ~500 words, 1: ~1000 words, 2: ~2000 words)
+2. BREAK DOWN complex sentences into 2-3 simple sentences
+3. REDUCE sentence length to 8-12 characters on average
+4. ELIMINATE all idioms, metaphors, and rhetorical devices
+5. USE only basic grammatical structures
+6. AVOID abstract concepts and complex reasoning
+
+YOU MUST PRODUCE A SIGNIFICANTLY SIMPLIFIED version that a learner at this level can easily understand.`;
+        } else if (['3', '3+', '4', 'B1', 'B2'].includes(level)) {
+          userPrompt += `
+
+MIDDLE LEVEL SPECIFIC TRANSFORMATION GUIDE:
+
+VOCABULARY ENRICHMENT EXAMPLES:
+- 科技發展 → 科技日新月異的發展
+- 人類 → 人類社會/人們
+- 腳步 → 探索腳步/步伐
+- 深空探索 → 深空探索計畫
+- 採礦技術 → 太空採礦技術
+- 太空開拓 → 太空資源開拓
+- 資源 → 寶貴資源
+- 法律爭論 → 法律爭議/爭論
+- 私營企業 → 民營企業/私人企業
+- 國際公約 → 國際條約/公約
+- 約束 → 規範與約束
+- 強國競爭 → 大國競爭/強國間競爭
+- 外交挑戰 → 外交層面的挑戰
+- 經濟利益 → 經濟利益/效益
+- 和平安全 → 和平與安全保障
+
+GRAMMAR ENHANCEMENT EXAMPLES:
+- 添加適當的連詞：因為、所以、但是、而且
+- 使用簡單的複合句
+- 增加描述性詞語和修飾語
+- 改善句子之間的邏輯連接
+
+TRANSFORMATION REQUIREMENTS:
+1. ENRICH vocabulary to level-appropriate range (3: 4000-5000 words, 4: 8000-10000 words)
+2. IMPROVE sentence complexity with appropriate conjunctions
+3. ENHANCE descriptions with more vivid vocabulary
+4. IMPROVE logical connections between sentences
+5. DEMONSTRATE ability to express personal opinions
+6. USE paragraph structure effectively
+
+YOU MUST PRODUCE a clearly enhanced version that shows progression in language proficiency.`;
+        } else if (['6', '7', 'C1', 'C2'].includes(level)) {
+          userPrompt += `
+
+ADVANCED LEVEL SPECIFIC TRANSFORMATION GUIDE:
+
+VOCABULARY SOPHISTICATION EXAMPLES:
+- 科技發展 → 科技日新月異的迅猛發展/科技進步日新月異
+- 人類 → 人類文明/人類社會
+- 腳步 → 探索腳步不斷延伸/前行腳步
+- 深空探索 → 浩瀚宇宙的深空探索/深空探索領域
+- 採礦技術 → 先進的太空採礦技術/採礦技術日臻成熟
+- 太空開拓 → 太空疆域的開拓/太空資源開拓事業
+- 資源 → 珍貴的太空資源/豐富的資源蘊藏
+- 法律爭論 → 複雜的法律爭議/法律層面的爭論
+- 私營企業 → 民營企業/私人企業
+- 國際公約 → 國際法公約/國際條約體系
+- 約束 → 法律框架的約束/規範與約束機制
+- 強國競爭 → 大國博弈/強國間的競爭態勢
+- 外交挑戰 → 錯綜複雜的外交挑戰/外交領域的重大挑戰
+- 經濟利益 → 巨大的經濟利益/經濟效益
+- 和平安全 → 國際社會的和平與安全/和平安全格局
+
+COMPLEX GRAMMAR PATTERNS:
+- 因果複句：由於...因此.../因為...所以...
+- 轉折複句：雖然...但是.../儘管...然而...
+- 遞進複句：不僅...而且.../不但...還...
+- 並列複句：一方面...另一方面.../既...又...
+- 假設複句：如果...那麼.../假設...就...
+- 條件複句：只有...才.../只要...就...
+
+RHETORICAL DEVICES TO ADD:
+- 比喻：將太空比作「新大陸」/將科技比作「推動力」
+- 排比：從...到.../不僅...也...更...
+- 誇張：無垠的宇宙/舉世矚目的突破
+- 對偶：開拓與保護並重/競爭與合作共存
+- 引用：如古人雲「知己知彼百戰不殆」
+
+TRANSFORMATION REQUIREMENTS:
+1. REPLACE at least 40% of common words with sophisticated alternatives
+2. ENSURE at least 60% of sentences use complex structures
+3. INCLUDE at least 3 different rhetorical devices
+4. USE formal and academic expressions
+5. ENHANCE logical connections with advanced transitions
+6. DEMONSTRATE variety in sentence structure and length
+7. CREATE a sophisticated, nuanced expression of ideas
+
+YOU MUST PRODUCE a dramatically enhanced version that clearly demonstrates advanced language proficiency. Simply making minor changes is UNACCEPTABLE.`;
+        }
+      } else {
+        // 一般修改提示詞：移除三段式結構，要求純文本輸出
+        userPrompt = `Please polish and rewrite the ENTIRE following Chinese text into a natural version:\n\n"${message}"\n\nCRITICAL REQUIREMENT:\n1. Output ONLY the revised text. Do not include any headings, notes, or explanations.\n2. Preserve all original details and paragraph structure. Do NOT arbitrarily add line breaks.`;
+      }
+    } else {
+      userPrompt = `User question: "${message}"\n\nProvide a brief, helpful response about Chinese learning. DO NOT generate any quizzes or tests.`;
+    }
+
+    console.log("Final user prompt length:", userPrompt.length);
+    const result = callGemini(userPrompt, systemPrompt);
+    console.log("Gemini response received:", result.substring(0, 100) + "...");
+    return result;
+
+  } catch (e) {
+    console.error("执行错误: " + e.toString());
+    return "系统错误: " + e.message + "。请稍后重试或联系管理员。";
+  }
+}
+
+function getFolderContents() {
+  try {
+    if (!FOLDER_ID) return [];
+    const folder = DriveApp.getFolderById(FOLDER_ID);
+    const files = folder.getFiles();
+    const contents = [];
+    while (files.hasNext()) {
+      const file = files.next();
+      const mime = file.getMimeType();
+      if (mime === MimeType.CSV || mime === MimeType.PLAIN_TEXT) {
+        contents.push({
+          "name": file.getName(),
+          "data": file.getBlob().getDataAsString().substring(0, 3000)
+        });
+      }
+    }
+    return contents;
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * 最佳化的 Gemini API 呼叫函式
+ * 採用穩定可用的 gemini-2.5-flash，提供優秀的中文文本處理能力
+ */
+function callGemini(userQuery, systemPrompt) {
+  // 使用穩定可用的 Gemini 2.5 Flash 模型，在 API v1beta 中完全支援
+  const modelId = "gemini-2.5-flash"; 
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${API_KEY}`;
+  
+  const payload = {
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ parts: [{ text: userQuery }] }],
+    // 將所有安全過濾器設定為 BLOCK_NONE，避免討論科技/社會議題時被誤擋
+    safetySettings: [
+      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+    ],
+    generationConfig: { 
+      temperature: 0.7, // 提高温度参数以鼓励更多样化的输出
+      maxOutputTokens: 8192,
+      topP: 0.9,
+      topK: 40
+    }
+  };
+
+  const options = {
+    method: "POST",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true 
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    const result = JSON.parse(responseText);
+
+    // 處理 HTTP 層級的錯誤
+    if (responseCode !== 200) {
+      const errorMsg = result.error ? result.error.message : "Unknown API Error";
+      return `API Error (${responseCode}): ${errorMsg}`;
+    }
+
+    // 檢查是否有回傳 candidates
+    if (result.candidates && result.candidates.length > 0) {
+      const candidate = result.candidates[0];
+      
+      if (candidate.finishReason === "SAFETY") {
+        return "The response was blocked by safety filters. Please try rephrasing your input.";
+      }
+      
+      if (candidate.content && candidate.content.parts && candidate.content.parts[0].text) {
+        return candidate.content.parts[0].text;
+      }
+
+      // 【除錯機制】如果模型回傳 HTTP 200，卻沒有給出任何文字，直接印出底層資訊
+      return `[系統除錯] 模型當機或未產出文字。\nFinishReason: ${candidate.finishReason}\nAPI 原始回應: ${responseText}`;
+    }
+
+    if (result.promptFeedback && result.promptFeedback.blockReason) {
+      return `Request blocked: ${result.promptFeedback.blockReason}`;
+    }
+
+    // 【除錯機制】如果完全沒有 candidates
+    return `[系統除錯] 找不到生成的內容。\nAPI 原始回應: ${responseText}`;
+    
+  } catch (e) {
+    console.error("fetch failed: " + e.toString());
+    return "Connection error: Failed to reach Gemini AI service. Details: " + e.message;
+  }
+}
+
+/**
+ * 测试文件访问权限
+ * @return {array} 文件访问结果
+ */
+function testFileAccess() {
+  try {
+    const fileMappings = {
+      vocabulary: {
+        id: '1wcSSTAHtzEqWrzDwNGHSz3BPgkxOAzV7',
+        name: '词语表.csv'
+      },
+      grammar: {
+        id: '1ttzFMUHOsptnRleUqcMnRmJLdMXgvpfA',
+        name: '语法点.csv'
+      },
+      commonWords: {
+        id: '19N19PNo5kutTO2wnFKO9O_uP_ZU-RBtq',
+        name: '通用词.csv'
+      },
+      affixes: {
+        id: '1cSjE8Nz8Ome4oA_BdLzg4YP4F9fE0WXg',
+        name: '类词缀.csv'
+      },
+      characters: {
+        id: '1EYxm3EibP_IDIOtw9s19YixRzL0slumb',
+        name: '汉字表.csv'
+      }
+    };
+    
+    const results = [];
+    
+    Object.keys(fileMappings).forEach(key => {
+      const fileInfo = fileMappings[key];
+      try {
+        // 尝试通过ID获取文件
+        let file;
+        try {
+          file = DriveApp.getFileById(fileInfo.id);
+          results.push({
+            name: fileInfo.name,
+            id: fileInfo.id,
+            accessible: true,
+            size: file.getSize(),
+            lastModified: file.getLastUpdated().toISOString()
+          });
+        } catch (e) {
+          // 尝试通过名称查找
+          const files = DriveApp.getFilesByName(fileInfo.name);
+          if (files.hasNext()) {
+            const foundFile = files.next();
+            results.push({
+              name: fileInfo.name,
+              id: foundFile.getId(),
+              accessible: true,
+              size: foundFile.getSize(),
+              lastModified: foundFile.getLastUpdated().toISOString()
+            });
+          } else {
+            results.push({
+              name: fileInfo.name,
+              id: fileInfo.id,
+              accessible: false,
+              error: e.message
+            });
+          }
+        }
+      } catch (error) {
+        results.push({
+          name: fileInfo.name,
+          id: fileInfo.id,
+          accessible: false,
+          error: error.message
+        });
+      }
+    });
+    
+    return results;
+  } catch (error) {
+    console.error('Error in testFileAccess:', error.message);
+    return [];
+  }
+}
+
+/**
+ * 检查词汇等级
+ * @param {string} word - 词汇
+ * @param {string} targetLevel - 目标等级
+ * @return {object} 检查结果
+ */
+function checkWordLevel(word, targetLevel) {
+  try {
+    const vocabularyData = loadVocabularyData();
+    const isAppropriate = isWordLevelAppropriate(word, targetLevel, vocabularyData);
+    const wordLevel = getWordMaxLevel(word, vocabularyData);
+    
+    // 查找建议替换词
+    const suggestions = [];
+    if (!isAppropriate) {
+      const replacement = findAppropriateReplacement(word, targetLevel, vocabularyData);
+      if (replacement) {
+        suggestions.push(replacement);
+      }
+      
+      // 从目标等级词汇中添加一些建议
+      const targetLevelNumber = getLevelNumber(targetLevel);
+      const levels = ["P", "1", "2", "3", "4", "5", "6", "7", "A1", "A2", "B1", "B2", "C1", "C2"];
+      
+      for (let i = 0; i < levels.length; i++) {
+        const level = levels[i];
+        if (getLevelNumber(level) <= targetLevelNumber && vocabularyData.vocabulary[level]) {
+          // 添加前3个词汇作为建议
+          const levelWords = vocabularyData.vocabulary[level].slice(0, 3);
+          suggestions.push(...levelWords);
+          if (suggestions.length >= 5) break;
+        }
+      }
+    }
+    
+    return {
+      word: word,
+      targetLevel: targetLevel,
+      wordLevel: wordLevel,
+      isAppropriate: isAppropriate,
+      suggestions: suggestions.slice(0, 5) // 最多返回5个建议
+    };
+  } catch (error) {
+    console.error('Error in checkWordLevel:', error.message);
+    return {
+      word: word,
+      targetLevel: targetLevel,
+      wordLevel: null,
+      isAppropriate: false,
+      suggestions: [],
+      error: error.message
+    };
+  }
+}
+
+function myFunction() {}
