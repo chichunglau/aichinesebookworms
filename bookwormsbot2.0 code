@@ -1,1 +1,3004 @@
+# TBCL Bookworms（Next.js + Vercel Postgres + Drizzle + Gemini）
+
+> 這份文件把「前端 + 後端（API Routes）+ 上傳檔案並用語料庫改寫/標註文本」全部整理成 **可直接複製貼上到 GitHub** 的多檔案版本。
+
+---
+
+## 1) 專案結構
+
+```txt
+.
+├─ package.json
+├─ next.config.mjs
+├─ postcss.config.mjs
+├─ tailwind.config.ts
+├─ tsconfig.json
+├─ drizzle.config.ts
+├─ scripts/
+│  └─ seed.ts
+├─ data/
+│  ├─ 臺灣華語文能力基準語法點表.xlsx
+│  ├─ 14452詞語表.xlsx
+│  ├─ 通用詞頻表.xlsx
+│  ├─ 類詞綴表.xlsx
+│  └─ 漢字表.xlsx
+└─ src/
+   ├─ app/
+   │  ├─ globals.css
+   │  ├─ layout.tsx
+   │  ├─ page.tsx
+   │  └─ api/
+   │     ├─ health/route.ts
+   │     ├─ article/generate/route.ts
+   │     ├─ practice/cloze/route.ts
+   │     ├─ search/vocab/route.ts
+   │     ├─ search/grammar/route.ts
+   │     ├─ chat/route.ts
+   │     └─ text/rewrite/route.ts   # ✅ 檔案上傳 + 用語料庫改寫/標註
+   ├─ components/
+   │  ├─ I18nProvider.tsx
+   │  ├─ LanguageSelector.tsx
+   │  ├─ LevelSelector.tsx
+   │  ├─ ArticleGenerator.tsx
+   │  ├─ PracticePanel.tsx
+   │  ├─ SearchPanel.tsx
+   │  ├─ ChatPanel.tsx
+   │  └─ UploadRewritePanel.tsx     # ✅ 前端上傳檔案
+   ├─ db/
+   │  ├─ index.ts
+   │  └─ schema.ts
+   └─ lib/
+      ├─ levels.ts
+      ├─ i18n.ts
+      ├─ gemini.ts
+      └─ text.ts
+```
+
+---
+
+## 2) 環境變數（Vercel / 本機）
+
+建立 `.env.local`：
+
+```bash
+POSTGRES_URL=postgres://...
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.0-flash
+```
+
+---
+
+## 3) package.json
+
+```json
+{
+  "name": "tbcl-bookworms",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:seed": "tsx scripts/seed.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^0.10.0",
+    "@vercel/postgres": "^0.10.0",
+    "drizzle-orm": "^0.36.0",
+    "mammoth": "^1.7.2",
+    "next": "^14.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/react": "^18.2.79",
+    "@types/react-dom": "^18.2.25",
+    "autoprefixer": "^10.4.19",
+    "drizzle-kit": "^0.27.0",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "tsx": "^4.15.6",
+    "typescript": "^5.4.5"
+  }
+}
+```
+
+---
+
+## 4) Next/Tailwind 設定
+
+### next.config.mjs
+
+```js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+};
+
+export default nextConfig;
+```
+
+### tailwind.config.ts
+
+```ts
+import type { Config } from 'tailwindcss';
+
+export default {
+  content: ['./src/**/*.{ts,tsx}'],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+} satisfies Config;
+```
+
+### postcss.config.mjs
+
+```js
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
+```
+
+### tsconfig.json（含 @/* alias）
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}
+```
+
+---
+
+## 5) Drizzle 設定與資料表
+
+### drizzle.config.ts
+
+```ts
+import type { Config } from 'drizzle-kit';
+
+export default {
+  schema: './src/db/schema.ts',
+  out: './drizzle',
+  dialect: 'postgresql',
+  dbCredentials: {
+    url: process.env.POSTGRES_URL!,
+  },
+} satisfies Config;
+```
+
+### src/db/index.ts
+
+```ts
+import { drizzle } from 'drizzle-orm/vercel-postgres';
+import { sql } from '@vercel/postgres';
+
+export const db = drizzle(sql);
+```
+
+### src/db/schema.ts
+
+```ts
+import {
+  pgTable,
+  serial,
+  text,
+  integer,
+  timestamp,
+  boolean,
+} from 'drizzle-orm/pg-core';
+
+export const vocab = pgTable('vocab', {
+  id: serial('id').primaryKey(),
+  word: text('word').notNull(),
+  pinyin: text('pinyin'),
+  bopomofo: text('bopomofo'),
+  gloss: text('gloss'),
+  levelNum: integer('level_num').notNull(),
+  situation: text('situation'),
+  wfreq: integer('wfreq'),
+  sfreq: integer('sfreq'),
+});
+
+export const grammar = pgTable('grammar', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  levelNum: integer('level_num').notNull(),
+  tier: text('tier'),
+  description: text('description'),
+  example: text('example'),
+});
+
+// 用於練習/錯題追蹤（可選）
+export const practiceLog = pgTable('practice_log', {
+  id: serial('id').primaryKey(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  uiLevel: text('ui_level').notNull(),
+  coreLevel: integer('core_level').notNull(),
+  mode: text('mode').notNull(),
+  prompt: text('prompt').notNull(),
+  answer: text('answer').notNull(),
+  picked: text('picked'),
+  correct: boolean('correct').default(false).notNull(),
+});
+```
+
+---
+
+## 6) Seed（把你上傳的 xlsx 灌進 Postgres）
+
+> 你只要把 xlsx 檔名對應好放在 `data/`，就能 `pnpm db:seed`。
+
+### scripts/seed.ts
+
+```ts
+import 'dotenv/config';
+import * as XLSX from 'xlsx';
+import { db } from '@/db';
+import { vocab, grammar } from '@/db/schema';
+
+function readSheet(filePath: string, sheetName?: string) {
+  const wb = XLSX.readFile(filePath);
+  const name = sheetName ?? wb.SheetNames[0];
+  const ws = wb.Sheets[name];
+  return XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: '' });
+}
+
+async function main() {
+  // ✅ 1) 詞彙表（請依你的實際欄名調整 mapping）
+  // 假設欄名：詞語、拼音、注音、級別、情境、釋義
+  const vocabRows = readSheet('data/14452詞語表.xlsx');
+  const vocabInserts = vocabRows
+    .map((r) => {
+      const word = String(r['詞語'] ?? r['词语'] ?? r['word'] ?? '').trim();
+      if (!word) return null;
+      const levelNum = Number(r['級別'] ?? r['级别'] ?? r['level'] ?? 1) || 1;
+      return {
+        word,
+        pinyin: String(r['拼音'] ?? r['pinyin'] ?? '').trim() || null,
+        bopomofo: String(r['注音'] ?? r['bopomofo'] ?? '').trim() || null,
+        gloss: String(r['釋義'] ?? r['释义'] ?? r['gloss'] ?? '').trim() || null,
+        levelNum,
+        situation: String(r['情境'] ?? r['situation'] ?? '').trim() || null,
+      };
+    })
+    .filter(Boolean) as any[];
+
+  if (vocabInserts.length) {
+    // 簡單分批避免單次太大
+    const chunk = 1000;
+    for (let i = 0; i < vocabInserts.length; i += chunk) {
+      await db.insert(vocab).values(vocabInserts.slice(i, i + chunk));
+      console.log(`Inserted vocab: ${Math.min(i + chunk, vocabInserts.length)}/${vocabInserts.length}`);
+    }
+  }
+
+  // ✅ 2) 語法點表（請依你的實際欄名調整 mapping）
+  // 假設欄名：語法點、級別、等別、說明、例句
+  const grammarRows = readSheet('data/臺灣華語文能力基準語法點表.xlsx');
+  const grammarInserts = grammarRows
+    .map((r) => {
+      const name = String(r['語法點'] ?? r['语法点'] ?? r['name'] ?? '').trim();
+      if (!name) return null;
+      const levelNum = Number(r['級別'] ?? r['级别'] ?? r['level'] ?? 1) || 1;
+      return {
+        name,
+        levelNum,
+        tier: String(r['等別'] ?? r['tier'] ?? '').trim() || null,
+        description: String(r['說明'] ?? r['说明'] ?? r['description'] ?? '').trim() || null,
+        example: String(r['例句'] ?? r['example'] ?? '').trim() || null,
+      };
+    })
+    .filter(Boolean) as any[];
+
+  if (grammarInserts.length) {
+    const chunk = 1000;
+    for (let i = 0; i < grammarInserts.length; i += chunk) {
+      await db.insert(grammar).values(grammarInserts.slice(i, i + chunk));
+      console.log(`Inserted grammar: ${Math.min(i + chunk, grammarInserts.length)}/${grammarInserts.length}`);
+    }
+  }
+
+  console.log('✅ Seed done');
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+```
+
+---
+
+## 7) Gemini Helper
+
+### src/lib/gemini.ts
+
+```ts
+import { GoogleGenAI } from '@google/genai';
+
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey) throw new Error('Missing GEMINI_API_KEY');
+
+export const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
+
+export const ai = new GoogleGenAI({ apiKey });
+
+export async function generateJson<T>(args: {
+  system: string;
+  prompt: string;
+  schema: any;
+  temperature?: number;
+  maxOutputTokens?: number;
+}): Promise<T> {
+  const res = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: args.prompt,
+    config: {
+      systemInstruction: args.system,
+      responseMimeType: 'application/json',
+      responseSchema: args.schema,
+      temperature: args.temperature ?? 0.4,
+      maxOutputTokens: args.maxOutputTokens ?? 2048,
+    },
+  });
+
+  // SDK 會把 JSON 當文字回傳
+  const text = (res.text ?? '').trim();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // fallback：嘗試抓出第一段 JSON
+    const m = text.match(/\{[\s\S]*\}$/);
+    if (!m) throw new Error('Model did not return JSON');
+    return JSON.parse(m[0]) as T;
+  }
+}
+```
+
+---
+
+## 8) 上傳檔案解析（txt / md / docx）
+
+### src/lib/text.ts
+
+```ts
+import mammoth from 'mammoth';
+
+export async function fileToText(file: File): Promise<string> {
+  const name = file.name.toLowerCase();
+  const buf = Buffer.from(await file.arrayBuffer());
+
+  if (name.endsWith('.txt') || name.endsWith('.md')) {
+    return buf.toString('utf-8');
+  }
+
+  if (name.endsWith('.docx')) {
+    const out = await mammoth.extractRawText({ buffer: buf });
+    return (out.value ?? '').trim();
+  }
+
+  // 需要 PDF 的話：建議走「Vercel Blob + 後端解析」或用外部服務
+  // 這裡先明確擋掉，避免 Vercel Functions 超時/超大小
+  throw new Error('Unsupported file type. Please upload .txt / .md / .docx');
+}
+
+export function normalizeText(s: string) {
+  return s.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+```
+
+---
+
+## 9) API Routes（後端）
+
+### 9.1 src/app/api/health/route.ts
+
+```ts
+import { NextResponse } from 'next/server';
+import { db } from '@/db';
+import { grammar, vocab } from '@/db/schema';
+
+export async function GET() {
+  const [v] = await db.select({ c: vocab.id }).from(vocab).limit(1);
+  const [g] = await db.select({ c: grammar.id }).from(grammar).limit(1);
+  return NextResponse.json({ ok: true, hasVocab: !!v, hasGrammar: !!g });
+}
+```
+
+### 9.2 src/app/api/search/vocab/route.ts
+
+```ts
+import { NextResponse } from 'next/server';
+import { db } from '@/db';
+import { vocab } from '@/db/schema';
+import { and, ilike, lte, or } from 'drizzle-orm';
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const q = (searchParams.get('q') ?? '').trim();
+  const coreLevel = Number(searchParams.get('coreLevel') ?? '7') || 7;
+
+  const where = and(
+    lte(vocab.levelNum, coreLevel),
+    q
+      ? or(
+          ilike(vocab.word, `%${q}%`),
+          ilike(vocab.pinyin, `%${q}%`),
+          ilike(vocab.bopomofo, `%${q}%`)
+        )
+      : undefined
+  );
+
+  const items = await db
+    .select({
+      word: vocab.word,
+      pinyin: vocab.pinyin,
+      bopomofo: vocab.bopomofo,
+      gloss: vocab.gloss,
+      levelNum: vocab.levelNum,
+      situation: vocab.situation,
+      wfreq: vocab.wfreq,
+      sfreq: vocab.sfreq,
+    })
+    .from(vocab)
+    .where(where)
+    .limit(50);
+
+  return NextResponse.json({ items });
+}
+```
+
+### 9.3 src/app/api/search/grammar/route.ts
+
+```ts
+import { NextResponse } from 'next/server';
+import { db } from '@/db';
+import { grammar } from '@/db/schema';
+import { and, ilike, lte } from 'drizzle-orm';
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const q = (searchParams.get('q') ?? '').trim();
+  const coreLevel = Number(searchParams.get('coreLevel') ?? '7') || 7;
+
+  const items = await db
+    .select({
+      name: grammar.name,
+      levelNum: grammar.levelNum,
+      tier: grammar.tier,
+      description: grammar.description,
+      example: grammar.example,
+    })
+    .from(grammar)
+    .where(and(lte(grammar.levelNum, coreLevel), q ? ilike(grammar.name, `%${q}%`) : undefined))
+    .limit(50);
+
+  return NextResponse.json({ items });
+}
+```
+
+### 9.4 src/app/api/article/generate/route.ts（生成文章 + 拆解）
+
+```ts
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { db } from '@/db';
+import { grammar, vocab } from '@/db/schema';
+import { desc, lte } from 'drizzle-orm';
+import { generateJson } from '@/lib/gemini';
+
+const Body = z.object({
+  uiLevel: z.string(),
+  coreLevel: z.number().int().min(1).max(7),
+  topic: z.string().min(1),
+  genre: z.enum(['narrative', 'dialogue', 'expository']).default('narrative'),
+  length: z.enum(['short', 'medium', 'long']).default('medium'),
+});
+
+export async function POST(req: Request) {
+  const body = Body.parse(await req.json());
+
+  const gPoints = await db
+    .select({ name: grammar.name, description: grammar.description, example: grammar.example })
+    .from(grammar)
+    .where(lte(grammar.levelNum, body.coreLevel))
+    .limit(18);
+
+  const vWords = await db
+    .select({ word: vocab.word, pinyin: vocab.pinyin, gloss: vocab.gloss })
+    .from(vocab)
+    .where(lte(vocab.levelNum, body.coreLevel))
+    .orderBy(desc(vocab.wfreq))
+    .limit(24);
+
+  const schema = {
+    type: 'object',
+    properties: {
+      title: { type: 'string' },
+      article: { type: 'string' },
+      levelLogic: { type: 'array', items: { type: 'string' } },
+      grammar: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            explanation: { type: 'string' },
+            evidence: { type: 'string' },
+            examples: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['name', 'explanation', 'examples']
+        }
+      },
+      vocab: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            word: { type: 'string' },
+            pinyin: { type: 'string' },
+            gloss: { type: 'string' },
+            examples: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['word', 'examples']
+        }
+      }
+    },
+    required: ['title', 'article', 'levelLogic', 'grammar', 'vocab']
+  };
+
+  const system = `You are a Chinese teaching content generator for international students in Taiwan.\n` +
+    `Return ONLY JSON (no markdown).`;
+
+  const prompt = `Generate a ${body.genre} Chinese text about: ${body.topic}.\n` +
+    `Target level: Core Level ${body.coreLevel} (TBCL ${body.uiLevel}).\n` +
+    `Length: ${body.length}.\n\n` +
+    `Use mostly the following vocabulary (not necessarily all):\n` +
+    vWords.map(v => `- ${v.word}${v.pinyin ? ` (${v.pinyin})` : ''}${v.gloss ? `: ${v.gloss}` : ''}`).join('\n') +
+    `\n\nPrefer using these grammar points (not necessarily all):\n` +
+    gPoints.map(g => `- ${g.name}${g.example ? ` | ex: ${g.example}` : ''}`).join('\n') +
+    `\n\nAfter writing, provide:\n` +
+    `- levelLogic: 4~7 bullets explaining how this level typically builds sentences\n` +
+    `- grammar: 6~10 items: name, explanation, evidence (a short quote from the article), 2~3 examples\n` +
+    `- vocab: 10~16 items: word, pinyin(optional), gloss(optional), 2 examples\n`;
+
+  const out = await generateJson<any>({
+    system,
+    prompt,
+    schema,
+    temperature: 0.5,
+    maxOutputTokens: body.length === 'long' ? 2600 : 1800,
+  });
+
+  return NextResponse.json(out);
+}
+```
+
+### 9.5 src/app/api/practice/cloze/route.ts（克漏字）
+
+```ts
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { db } from '@/db';
+import { grammar, vocab } from '@/db/schema';
+import { desc, lte } from 'drizzle-orm';
+import { generateJson } from '@/lib/gemini';
+
+const Body = z.object({
+  uiLevel: z.string(),
+  coreLevel: z.number().int().min(1).max(7),
+  mode: z.enum(['mixed', 'vocab', 'grammar']).default('mixed'),
+  count: z.number().int().min(4).max(20).default(8),
+  // 可選：弱點模式（前端傳 true/false）
+  weakMode: z.boolean().optional(),
+});
+
+export async function POST(req: Request) {
+  const body = Body.parse(await req.json());
+
+  const words = await db
+    .select({ word: vocab.word, gloss: vocab.gloss })
+    .from(vocab)
+    .where(lte(vocab.levelNum, body.coreLevel))
+    .orderBy(desc(vocab.wfreq))
+    .limit(40);
+
+  const points = await db
+    .select({ name: grammar.name, description: grammar.description, example: grammar.example })
+    .from(grammar)
+    .where(lte(grammar.levelNum, body.coreLevel))
+    .limit(30);
+
+  const schema = {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string' },
+            options: { type: 'array', items: { type: 'string' } },
+            answer: { type: 'string' },
+            explanation: { type: 'string' }
+          },
+          required: ['prompt', 'options', 'answer', 'explanation']
+        }
+      }
+    },
+    required: ['items']
+  };
+
+  const system = `You are a Chinese cloze quiz generator. Return ONLY JSON.`;
+
+  const prompt = `Create ${body.count} cloze multiple-choice questions for Chinese learners.\n` +
+    `Target level: Core Level ${body.coreLevel} (TBCL ${body.uiLevel}).\n` +
+    `Mode: ${body.mode}. Weak-mode: ${body.weakMode ? 'ON' : 'OFF'}.\n\n` +
+    `Vocabulary pool:\n${words.map(w => `- ${w.word}${w.gloss ? `: ${w.gloss}` : ''}`).join('\n')}\n\n` +
+    `Grammar pool:\n${points.map(g => `- ${g.name}${g.example ? ` | ${g.example}` : ''}`).join('\n')}\n\n` +
+    `Rules:\n` +
+    `- Each item has: prompt with one blank like ____\n` +
+    `- options: 4 strings\n` +
+    `- answer must be one of the options\n` +
+    `- explanation: short and clear\n`;
+
+  const out = await generateJson<any>({ system, prompt, schema, temperature: 0.6, maxOutputTokens: 1800 });
+  return NextResponse.json(out);
+}
+```
+
+### 9.6 src/app/api/chat/route.ts（教學助理：可雙語）
+
+```ts
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { ai, GEMINI_MODEL } from '@/lib/gemini';
+
+const Body = z.object({
+  uiLevel: z.string(),
+  coreLevel: z.number().int().min(1).max(7),
+  message: z.string().min(1),
+  // 由前端控制雙語：例如 lang = "en" | "vi" | "my" | "id" | null
+  lang: z.string().nullable().optional(),
+});
+
+export async function POST(req: Request) {
+  const body = Body.parse(await req.json());
+
+  const bilingual = body.lang ? `\nReply bilingual: Traditional Chinese + ${body.lang}.` : '';
+
+  const system = `You are a Chinese teacher assistant for international students in Taiwan.\n` +
+    `Use vocabulary/grammar mostly at Core Level ${body.coreLevel}.` + bilingual;
+
+  const res = await ai.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: body.message,
+    config: {
+      systemInstruction: system,
+      temperature: 0.4,
+      maxOutputTokens: 900,
+    },
+  });
+
+  return NextResponse.json({ answer: (res.text ?? '').trim() });
+}
+```
+
+### 9.7 ✅ src/app/api/text/rewrite/route.ts（上傳檔案 → 用語料庫改寫/標註）
+
+* 前端以 `multipart/form-data` 上傳 `.txt/.md/.docx`
+* 後端抽「不高於等級」的常用詞 + 語法點，讓模型：
+
+  * 依 action（simplify/upgrade/correct/annotate）改寫
+  * 並回傳 changeLog + 針對語法/詞彙的教學說明
+
+```ts
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { db } from '@/db';
+import { grammar, vocab } from '@/db/schema';
+import { desc, lte } from 'drizzle-orm';
+import { generateJson } from '@/lib/gemini';
+import { fileToText, normalizeText } from '@/lib/text';
+
+const Form = z.object({
+  uiLevel: z.string(),
+  coreLevel: z.coerce.number().int().min(1).max(7),
+  action: z.enum(['simplify', 'upgrade', 'correct', 'annotate']).default('simplify'),
+  lang: z.string().nullable().optional(),
+});
+
+export async function POST(req: Request) {
+  const form = await req.formData();
+
+  const uiLevel = String(form.get('uiLevel') ?? '2+');
+  const coreLevel = Number(form.get('coreLevel') ?? '2') || 2;
+  const action = String(form.get('action') ?? 'simplify') as any;
+  const lang = (form.get('lang') ? String(form.get('lang')) : null) as string | null;
+
+  const parsed = Form.parse({ uiLevel, coreLevel, action, lang });
+
+  const file = form.get('file');
+  if (!file || !(file instanceof File)) {
+    return NextResponse.json({ error: 'Missing file' }, { status: 400 });
+  }
+
+  // ✅ 基本大小保護（Vercel Functions 有 request body 限制；也避免記憶體爆）
+  if (file.size > 1_500_000) {
+    return NextResponse.json(
+      { error: 'File too large. Please keep it under ~1.5MB (use .txt/.docx with shorter content).' },
+      { status: 413 }
+    );
+  }
+
+  let originalText = '';
+  try {
+    originalText = normalizeText(await fileToText(file));
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message ?? 'Failed to read file' }, { status: 400 });
+  }
+
+  if (!originalText) {
+    return NextResponse.json({ error: 'Empty text' }, { status: 400 });
+  }
+
+  const words = await db
+    .select({ word: vocab.word, gloss: vocab.gloss, pinyin: vocab.pinyin })
+    .from(vocab)
+    .where(lte(vocab.levelNum, parsed.coreLevel))
+    .orderBy(desc(vocab.wfreq))
+    .limit(50);
+
+  const points = await db
+    .select({ name: grammar.name, description: grammar.description, example: grammar.example })
+    .from(grammar)
+    .where(lte(grammar.levelNum, parsed.coreLevel))
+    .limit(35);
+
+  const schema = {
+    type: 'object',
+    properties: {
+      revisedText: { type: 'string' },
+      changeLog: { type: 'array', items: { type: 'string' } },
+      teachNotes: {
+        type: 'object',
+        properties: {
+          grammar: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                explanation: { type: 'string' },
+                examples: { type: 'array', items: { type: 'string' } }
+              },
+              required: ['name', 'explanation', 'examples']
+            }
+          },
+          vocab: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                word: { type: 'string' },
+                gloss: { type: 'string' },
+                examples: { type: 'array', items: { type: 'string' } }
+              },
+              required: ['word', 'examples']
+            }
+          }
+        },
+        required: ['grammar', 'vocab']
+      },
+      bilingual: {
+        type: 'object',
+        properties: {
+          lang: { type: 'string' },
+          revisedText: { type: 'string' },
+          teachNotes: { type: 'string' }
+        }
+      }
+    },
+    required: ['revisedText', 'changeLog', 'teachNotes']
+  };
+
+  const bilingualHint = parsed.lang
+    ? `\nAdditionally provide bilingual fields: bilingual.lang, bilingual.revisedText, bilingual.teachNotes in ${parsed.lang}.`
+    : '';
+
+  const system = `You are a Chinese teaching editor for international students in Taiwan. Return ONLY JSON.`;
+
+  const actionGuide: Record<string, string> = {
+    simplify: 'Rewrite the text to be simpler, mostly using Core Level vocabulary/grammar, while keeping meaning.',
+    upgrade: 'Rewrite the text to be more advanced but still within the target level. Improve style and cohesion.',
+    correct: 'Correct grammar/wording, keep original level as much as possible, and improve naturalness.',
+    annotate: 'Keep the text mostly the same, but revise small parts to match target level and make it teachable.',
+  };
+
+  const prompt = `TASK: ${actionGuide[parsed.action] ?? actionGuide.simplify}\n` +
+    `Target: Core Level ${parsed.coreLevel} (TBCL ${parsed.uiLevel}).\n` +
+    `Original text:\n---\n${originalText}\n---\n\n` +
+    `Use mostly these vocabulary (not necessarily all):\n` +
+    words.map(w => `- ${w.word}${w.pinyin ? ` (${w.pinyin})` : ''}${w.gloss ? `: ${w.gloss}` : ''}`).join('\n') +
+    `\n\nPrefer these grammar points (not necessarily all):\n` +
+    points.map(g => `- ${g.name}${g.example ? ` | ex: ${g.example}` : ''}`).join('\n') +
+    `\n\nOutput:\n` +
+    `- revisedText (Traditional Chinese)\n` +
+    `- changeLog: 6~12 bullets, what you changed and why\n` +
+    `- teachNotes: pick 5~8 grammar points used + 8~14 key vocab with short explanations and 2 examples each\n` +
+    bilingualHint;
+
+  const out = await generateJson<any>({ system, prompt, schema, temperature: 0.35, maxOutputTokens: 2200 });
+
+  return NextResponse.json({
+    originalText,
+    ...out,
+  });
+}
+```
+
+---
+
+## 10) 前端（App Router + Tailwind + 多語雙語 UI）
+
+### src/app/globals.css
+
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { background: #f6f7fb; }
+```
+
+### src/app/layout.tsx
+
+```tsx
+import './globals.css';
+import type { Metadata } from 'next';
+import { I18nProvider } from '@/components/I18nProvider';
+
+export const metadata: Metadata = {
+  title: 'TBCL Bookworms',
+  description: 'TBCL/TOCFL 語料庫 + 生成式練習',
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="zh-Hant">
+      <body className="min-h-screen text-slate-900">
+        <I18nProvider>{children}</I18nProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+## 11) i18n（中文 + 英/越/緬/印）
+
+### src/lib/i18n.ts
+
+```ts
+export type Lang = 'en' | 'vi' | 'my' | 'id';
+
+export type I18nKey =
+  | 'app.title'
+  | 'app.subtitle'
+  | 'tab.generate'
+  | 'tab.practice'
+  | 'tab.search'
+  | 'tab.chat'
+  | 'tab.upload'
+  | 'common.level'
+  | 'common.generate'
+  | 'common.search'
+  | 'common.upload'
+  | 'common.action'
+  | 'upload.hint'
+  | 'upload.pickFile'
+  | 'upload.action.simplify'
+  | 'upload.action.upgrade'
+  | 'upload.action.correct'
+  | 'upload.action.annotate'
+  | 'upload.run'
+  | 'upload.original'
+  | 'upload.revised'
+  | 'upload.changelog'
+  | 'upload.teachNotes';
+
+const ZH: Record<I18nKey, string> = {
+  'app.title': 'TBCL Bookworms',
+  'app.subtitle': '查詞、查語法、生成文章、克漏字、上傳文本改寫/標註',
+  'tab.generate': '生成文章 + 拆解',
+  'tab.practice': '練習（克漏字）',
+  'tab.search': '詞彙 / 語法查詢',
+  'tab.chat': '教學助理',
+  'tab.upload': '上傳文本改寫',
+  'common.level': '等級',
+  'common.generate': '生成',
+  'common.search': '查詢',
+  'common.upload': '上傳',
+  'common.action': '模式',
+  'upload.hint': '支援 .txt / .md / .docx（建議小於 1.5MB）',
+  'upload.pickFile': '選擇檔案',
+  'upload.action.simplify': '簡化到目標等級',
+  'upload.action.upgrade': '提升到目標等級上限（仍不超標）',
+  'upload.action.correct': '修正文句（盡量保留原等級）',
+  'upload.action.annotate': '教學化改寫（可講解）',
+  'upload.run': '開始改寫/標註',
+  'upload.original': '原文',
+  'upload.revised': '改寫後',
+  'upload.changelog': '修改重點',
+  'upload.teachNotes': '教學拆解（語法/詞彙 + 例句）',
+};
+
+const EN: Record<I18nKey, string> = {
+  'app.title': 'TBCL Bookworms',
+  'app.subtitle': 'Search vocab/grammar, generate articles, cloze practice, upload & rewrite.',
+  'tab.generate': 'Generate + Breakdown',
+  'tab.practice': 'Practice (Cloze)',
+  'tab.search': 'Search',
+  'tab.chat': 'Tutor Chat',
+  'tab.upload': 'Upload & Rewrite',
+  'common.level': 'Level',
+  'common.generate': 'Generate',
+  'common.search': 'Search',
+  'common.upload': 'Upload',
+  'common.action': 'Mode',
+  'upload.hint': 'Supports .txt / .md / .docx (recommended < 1.5MB)',
+  'upload.pickFile': 'Pick a file',
+  'upload.action.simplify': 'Simplify to target level',
+  'upload.action.upgrade': 'Upgrade but stay within level',
+  'upload.action.correct': 'Correct writing (keep level)',
+  'upload.action.annotate': 'Teaching-friendly rewrite',
+  'upload.run': 'Rewrite / Annotate',
+  'upload.original': 'Original',
+  'upload.revised': 'Rewritten',
+  'upload.changelog': 'Change log',
+  'upload.teachNotes': 'Teaching notes',
+};
+
+const VI: Record<I18nKey, string> = {
+  'app.title': 'TBCL Bookworms',
+  'app.subtitle': 'Tra cứu từ/ngữ pháp, tạo bài, luyện cloze, tải tệp để viết lại/chú giải.',
+  'tab.generate': 'Tạo bài + Phân tích',
+  'tab.practice': 'Luyện tập (Cloze)',
+  'tab.search': 'Tra cứu',
+  'tab.chat': 'Trợ giảng',
+  'tab.upload': 'Tải lên & Viết lại',
+  'common.level': 'Cấp độ',
+  'common.generate': 'Tạo',
+  'common.search': 'Tra',
+  'common.upload': 'Tải lên',
+  'common.action': 'Chế độ',
+  'upload.hint': 'Hỗ trợ .txt / .md / .docx (khuyến nghị < 1.5MB)',
+  'upload.pickFile': 'Chọn tệp',
+  'upload.action.simplify': 'Đơn giản hóa theo cấp độ',
+  'upload.action.upgrade': 'Nâng cấp nhưng không vượt cấp độ',
+  'upload.action.correct': 'Sửa lỗi (giữ cấp độ)',
+  'upload.action.annotate': 'Viết lại phục vụ giảng dạy',
+  'upload.run': 'Viết lại / Chú giải',
+  'upload.original': 'Bản gốc',
+  'upload.revised': 'Bản viết lại',
+  'upload.changelog': 'Nhật ký thay đổi',
+  'upload.teachNotes': 'Ghi chú giảng dạy',
+};
+
+const MY: Record<I18nKey, string> = {
+  'app.title': 'TBCL Bookworms',
+  'app.subtitle': 'ဝေါဟာရ/သဒ္ဒါရှာဖွေ၊ စာရေးပေး၊ Cloze လေ့ကျင့်၊ ဖိုင်တင်ပြီး ပြန်ရေး/မှတ်ချက်ပေး။',
+  'tab.generate': 'စာတမ်းထုတ် + ခွဲခြမ်း',
+  'tab.practice': 'လေ့ကျင့် (Cloze)',
+  'tab.search': 'ရှာဖွေ',
+  'tab.chat': 'သင်ကြားရေးအကူ',
+  'tab.upload': 'ဖိုင်တင် & ပြန်ရေး',
+  'common.level': 'အဆင့်',
+  'common.generate': 'ထုတ်',
+  'common.search': 'ရှာ',
+  'common.upload': 'တင်',
+  'common.action': 'မုဒ်',
+  'upload.hint': '.txt / .md / .docx ကိုထောက်ပံ့ (1.5MB အောက် အကြံပြု)',
+  'upload.pickFile': 'ဖိုင်ရွေး',
+  'upload.action.simplify': 'အဆင့်အလိုက် လွယ်ကူစေ',
+  'upload.action.upgrade': 'အဆင့်မကျော်ဘဲ မြှင့်တင်',
+  'upload.action.correct': 'စာရေးကို ပြင် (အဆင့်ကို ထိန်း)',
+  'upload.action.annotate': 'သင်ကြားရေးအတွက် ပြန်ရေး',
+  'upload.run': 'ပြန်ရေး / မှတ်ချက်',
+  'upload.original': 'မူရင်း',
+  'upload.revised': 'ပြန်ရေးပြီး',
+  'upload.changelog': 'ပြောင်းလဲချက်များ',
+  'upload.teachNotes': 'သင်ကြားရေးမှတ်စု',
+};
+
+const ID: Record<I18nKey, string> = {
+  'app.title': 'TBCL Bookworms',
+  'app.subtitle': 'Cari kosakata/tata bahasa, buat artikel, latihan cloze, unggah & revisi teks.',
+  'tab.generate': 'Generate + Breakdown',
+  'tab.practice': 'Latihan (Cloze)',
+  'tab.search': 'Pencarian',
+  'tab.chat': 'Tutor',
+  'tab.upload': 'Upload & Revisi',
+  'common.level': 'Level',
+  'common.generate': 'Buat',
+  'common.search': 'Cari',
+  'common.upload': 'Unggah',
+  'common.action': 'Mode',
+  'upload.hint': 'Mendukung .txt / .md / .docx (disarankan < 1.5MB)',
+  'upload.pickFile': 'Pilih file',
+  'upload.action.simplify': 'Sederhanakan sesuai level',
+  'upload.action.upgrade': 'Tingkatkan tapi tetap dalam level',
+  'upload.action.correct': 'Perbaiki tulisan (jaga level)',
+  'upload.action.annotate': 'Revisi untuk pengajaran',
+  'upload.run': 'Revisi / Anotasi',
+  'upload.original': 'Asli',
+  'upload.revised': 'Hasil revisi',
+  'upload.changelog': 'Catatan perubahan',
+  'upload.teachNotes': 'Catatan pengajaran',
+};
+
+export const DICT: Record<'zh' | Lang, Record<I18nKey, string>> = {
+  zh: ZH,
+  en: EN,
+  vi: VI,
+  my: MY,
+  id: ID,
+};
+
+export function t(key: I18nKey, lang: 'zh' | Lang) {
+  return DICT[lang][key] ?? DICT.zh[key] ?? key;
+}
+```
+
+---
+
+## 12) I18nProvider + LanguageSelector
+
+### src/components/I18nProvider.tsx
+
+```tsx
+'use client';
+
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import type { Lang, I18nKey } from '@/lib/i18n';
+import { t as tt } from '@/lib/i18n';
+
+type Ctx = {
+  lang: Lang;
+  setLang: (l: Lang) => void;
+  bilingualUI: boolean;
+  setBilingualUI: (v: boolean) => void;
+  t: (key: I18nKey) => string;
+  tb: (key: I18nKey) => string; // bilingual label
+};
+
+const I18nCtx = createContext<Ctx | null>(null);
+
+export function I18nProvider({ children }: { children: React.ReactNode }) {
+  const [lang, setLang] = useState<Lang>('en');
+  const [bilingualUI, setBilingualUI] = useState(true);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('tbcl_lang') as Lang | null;
+    const bi = localStorage.getItem('tbcl_bilingual_ui');
+    if (saved) setLang(saved);
+    if (bi) setBilingualUI(bi === '1');
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('tbcl_lang', lang);
+  }, [lang]);
+
+  useEffect(() => {
+    localStorage.setItem('tbcl_bilingual_ui', bilingualUI ? '1' : '0');
+  }, [bilingualUI]);
+
+  const value = useMemo<Ctx>(() => {
+    return {
+      lang,
+      setLang,
+      bilingualUI,
+      setBilingualUI,
+      t: (k) => tt(k, 'zh'),
+      tb: (k) => (bilingualUI ? `${tt(k, 'zh')} / ${tt(k, lang)}` : tt(k, 'zh')),
+    };
+  }, [lang, bilingualUI]);
+
+  return <I18nCtx.Provider value={value}>{children}</I18nCtx.Provider>;
+}
+
+export function useI18n() {
+  const ctx = useContext(I18nCtx);
+  if (!ctx) throw new Error('useI18n must be used within I18nProvider');
+  return ctx;
+}
+```
+
+### src/components/LanguageSelector.tsx
+
+```tsx
+'use client';
+
+import { useI18n } from '@/components/I18nProvider';
+
+export function LanguageSelector() {
+  const { lang, setLang, bilingualUI, setBilingualUI } = useI18n();
+
+  return (
+    <div className="flex items-center gap-2">
+      <label className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200">
+        <input
+          type="checkbox"
+          checked={bilingualUI}
+          onChange={(e) => setBilingualUI(e.target.checked)}
+        />
+        雙語UI
+      </label>
+
+      <select
+        value={lang}
+        onChange={(e) => setLang(e.target.value as any)}
+        className="rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200"
+      >
+        <option value="en">English</option>
+        <option value="vi">Tiếng Việt</option>
+        <option value="my">မြန်မာ</option>
+        <option value="id">Bahasa Indonesia</option>
+      </select>
+    </div>
+  );
+}
+```
+
+---
+
+## 13) 等級工具（levels.ts）
+
+### src/lib/levels.ts
+
+```ts
+export type UiLevelKey = 'P' | '1' | '2' | '2+' | '3' | '3+' | '4' | '5' | '6' | '7';
+
+export const UI_LEVELS: { key: UiLevelKey; tbclLabel: string; cefr?: string; colorClass: string }[] = [
+  { key: 'P', tbclLabel: 'P', colorClass: 'text-slate-500' },
+  { key: '1', tbclLabel: '1', cefr: 'Novice 1', colorClass: 'text-emerald-600' },
+  { key: '2', tbclLabel: '2', cefr: 'Novice 2', colorClass: 'text-emerald-600' },
+  { key: '2+', tbclLabel: '2+', cefr: 'A1', colorClass: 'text-sky-600' },
+  { key: '3', tbclLabel: '3', colorClass: 'text-slate-500' },
+  { key: '3+', tbclLabel: '3+', cefr: 'A2', colorClass: 'text-sky-600' },
+  { key: '4', tbclLabel: '4', cefr: 'B1', colorClass: 'text-amber-600' },
+  { key: '5', tbclLabel: '5', cefr: 'B2', colorClass: 'text-amber-600' },
+  { key: '6', tbclLabel: '6', cefr: 'C1', colorClass: 'text-red-600' },
+  { key: '7', tbclLabel: '7', cefr: 'C2', colorClass: 'text-red-600' },
+];
+
+export function uiLevelFromSlider(value: number): UiLevelKey {
+  return UI_LEVELS[Math.max(0, Math.min(UI_LEVELS.length - 1, value))].key;
+}
+
+export function sliderFromUiLevel(level: UiLevelKey): number {
+  const idx = UI_LEVELS.findIndex((l) => l.key === level);
+  return idx >= 0 ? idx : 0;
+}
+
+export function toCoreLevelNumber(level: UiLevelKey): number {
+  switch (level) {
+    case 'P':
+    case '1':
+      return 1;
+    case '2':
+    case '2+':
+      return 2;
+    case '3':
+    case '3+':
+      return 3;
+    case '4':
+      return 4;
+    case '5':
+      return 5;
+    case '6':
+      return 6;
+    case '7':
+      return 7;
+    default:
+      return 1;
+  }
+}
+
+export function coreLevelLabel(levelNum: number): string {
+  return `第${levelNum}級`;
+}
+```
+
+---
+
+## 14) LevelSelector（同你先前版本）
+
+### src/components/LevelSelector.tsx
+
+```tsx
+'use client';
+
+import { UI_LEVELS, sliderFromUiLevel, uiLevelFromSlider, type UiLevelKey } from '@/lib/levels';
+
+export function LevelSelector({ value, onChange }: { value: UiLevelKey; onChange: (next: UiLevelKey) => void }) {
+  const sliderValue = sliderFromUiLevel(value);
+  const current = UI_LEVELS[sliderValue];
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white/70 backdrop-blur px-5 py-4 shadow-sm">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className="text-xs font-semibold tracking-wide text-slate-500">Choose your level</div>
+          <div className="mt-1 text-sm text-slate-700">
+            TBCL <span className="font-semibold">{current.tbclLabel}</span>
+            {current.cefr ? (
+              <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
+                {current.cefr}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <div className={`rounded-full bg-slate-50 px-3 py-1 text-xs font-bold ${current.colorClass}`}>
+          {current.cefr ?? 'Not Selected'}
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <input
+          className="mt-2 w-full accent-blue-600"
+          type="range"
+          min={0}
+          max={UI_LEVELS.length - 1}
+          step={1}
+          value={sliderValue}
+          onChange={(e) => onChange(uiLevelFromSlider(Number(e.target.value)))}
+        />
+
+        <div className="mt-1 grid grid-cols-10 text-center text-[10px] text-slate-500">
+          {UI_LEVELS.map((l, idx) => (
+            <span key={l.key} className={idx === 0 ? 'text-slate-500' : 'border-l border-slate-200'}>
+              {l.tbclLabel}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 15) ✅ UploadRewritePanel（前端上傳檔案 → 改寫/標註）
+
+### src/components/UploadRewritePanel.tsx
+
+```tsx
+'use client';
+
+import { useMemo, useState } from 'react';
+import type { UiLevelKey } from '@/lib/levels';
+import { coreLevelLabel, toCoreLevelNumber } from '@/lib/levels';
+import { useI18n } from '@/components/I18nProvider';
+
+type TeachNotes = {
+  grammar: { name: string; explanation: string; examples: string[] }[];
+  vocab: { word: string; gloss?: string; examples: string[] }[];
+};
+
+type Result = {
+  originalText: string;
+  revisedText: string;
+  changeLog: string[];
+  teachNotes: TeachNotes;
+  bilingual?: { lang: string; revisedText: string; teachNotes: string };
+};
+
+export function UploadRewritePanel({ level }: { level: UiLevelKey }) {
+  const coreLevel = toCoreLevelNumber(level);
+  const { lang, tb } = useI18n();
+
+  const [file, setFile] = useState<File | null>(null);
+  const [action, setAction] = useState<'simplify' | 'upgrade' | 'correct' | 'annotate'>('simplify');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<Result | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const accept = useMemo(() => '.txt,.md,.docx', []);
+
+  async function run() {
+    if (!file) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const fd = new FormData();
+      fd.set('file', file);
+      fd.set('uiLevel', level);
+      fd.set('coreLevel', String(coreLevel));
+      fd.set('action', action);
+      // ✅ 這裡把「你選的介面語言」傳給後端做雙語欄位
+      fd.set('lang', lang);
+
+      const res = await fetch('/api/text/rewrite', {
+        method: 'POST',
+        body: fd,
+      });
+
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || `HTTP ${res.status}`);
+      }
+
+      const data = (await res.json()) as Result;
+      setResult(data);
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-6">
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-slate-600">{tb('common.level')}</label>
+          <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+            TBCL {level} → <span className="font-semibold">{coreLevelLabel(coreLevel)}</span>
+          </div>
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-slate-600">{tb('common.action')}</label>
+          <select
+            value={action}
+            onChange={(e) => setAction(e.target.value as any)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="simplify">{tb('upload.action.simplify')}</option>
+            <option value="upgrade">{tb('upload.action.upgrade')}</option>
+            <option value="correct">{tb('upload.action.correct')}</option>
+            <option value="annotate">{tb('upload.action.annotate')}</option>
+          </select>
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-slate-600">{tb('common.upload')}</label>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              type="file"
+              accept={accept}
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">{tb('upload.hint')}</div>
+        </div>
+
+        <div className="md:col-span-6">
+          <button
+            onClick={run}
+            disabled={!file || loading}
+            className="w-full rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading ? 'Running…' : tb('upload.run')}
+          </button>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>
+      ) : null}
+
+      {result ? (
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <section className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold">{tb('upload.original')}</div>
+              <div className="mt-2 whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-sm leading-7">
+                {result.originalText}
+              </div>
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold">{tb('upload.revised')}</div>
+                <button
+                  className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                  onClick={() => navigator.clipboard.writeText(result.revisedText)}
+                >
+                  Copy
+                </button>
+              </div>
+              <div className="mt-2 whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-sm leading-7">
+                {result.revisedText}
+              </div>
+
+              {result.bilingual?.revisedText ? (
+                <div className="mt-3 rounded-xl bg-slate-50 p-4 text-sm leading-7">
+                  <div className="text-xs font-semibold text-slate-500">Bilingual ({result.bilingual.lang})</div>
+                  <div className="mt-1 whitespace-pre-wrap">{result.bilingual.revisedText}</div>
+                </div>
+              ) : null}
+            </section>
+          </div>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="text-sm font-semibold">{tb('upload.changelog')}</div>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+              {result.changeLog.map((t, i) => (
+                <li key={i}>{t}</li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="text-sm font-semibold">{tb('upload.teachNotes')}</div>
+
+            <div className="mt-3 grid gap-4 lg:grid-cols-2">
+              <div>
+                <div className="text-xs font-semibold text-slate-600">Grammar</div>
+                <div className="mt-2 space-y-2">
+                  {result.teachNotes.grammar.map((g, idx) => (
+                    <div key={idx} className="rounded-xl bg-slate-50 p-3">
+                      <div className="font-semibold">{g.name}</div>
+                      <div className="mt-1 text-sm text-slate-700">{g.explanation}</div>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                        {g.examples.map((ex, i) => (
+                          <li key={i}>{ex}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs font-semibold text-slate-600">Vocab</div>
+                <div className="mt-2 space-y-2">
+                  {result.teachNotes.vocab.map((v, idx) => (
+                    <div key={idx} className="rounded-xl bg-slate-50 p-3">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <div className="font-semibold">{v.word}</div>
+                        <div className="text-xs text-slate-500">{v.gloss ?? ''}</div>
+                      </div>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                        {v.examples.map((ex, i) => (
+                          <li key={i}>{ex}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {result.bilingual?.teachNotes ? (
+              <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm leading-7">
+                <div className="text-xs font-semibold text-slate-500">Bilingual teach notes ({result.bilingual.lang})</div>
+                <div className="mt-1 whitespace-pre-wrap">{result.bilingual.teachNotes}</div>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          上傳你的學生作文（或教材片段）後，後端會「抓語料庫」把文本改寫成指定等級，並回傳可直接拿來教的拆解。
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 16) 首頁（Tabs + 語言選單 + 你的既有功能）
+
+> 下方 page.tsx 只把 **UploadRewritePanel** 加進 tabs；其餘（ArticleGenerator / PracticePanel / SearchPanel / ChatPanel）你可沿用你先前版本。
+
+### src/app/page.tsx
+
+```tsx
+'use client';
+
+import { useMemo, useState } from 'react';
+import type { UiLevelKey } from '@/lib/levels';
+import { LevelSelector } from '@/components/LevelSelector';
+import { LanguageSelector } from '@/components/LanguageSelector';
+import { useI18n } from '@/components/I18nProvider';
+
+import { ArticleGenerator } from '@/components/ArticleGenerator';
+import { PracticePanel } from '@/components/PracticePanel';
+import { SearchPanel } from '@/components/SearchPanel';
+import { ChatPanel } from '@/components/ChatPanel';
+import { UploadRewritePanel } from '@/components/UploadRewritePanel';
+
+type TabKey = 'generate' | 'practice' | 'search' | 'chat' | 'upload';
+
+export default function Page() {
+  const [level, setLevel] = useState<UiLevelKey>('2+');
+  const [tab, setTab] = useState<TabKey>('generate');
+  const { tb } = useI18n();
+
+  const tabs = useMemo(
+    () => [
+      { key: 'generate' as const, label: tb('tab.generate') },
+      { key: 'practice' as const, label: tb('tab.practice') },
+      { key: 'search' as const, label: tb('tab.search') },
+      { key: 'chat' as const, label: tb('tab.chat') },
+      { key: 'upload' as const, label: tb('tab.upload') },
+    ],
+    [tb]
+  );
+
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-8">
+      <header className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{tb('app.title')}</h1>
+            <p className="mt-1 text-sm text-slate-600">{tb('app.subtitle')}</p>
+          </div>
+          <LanguageSelector />
+        </div>
+
+        <LevelSelector value={level} onChange={setLevel} />
+
+        <nav className="flex flex-wrap gap-2">
+          {tabs.map((t) => {
+            const active = t.key === tab;
+            return (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={
+                  active
+                    ? 'rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow'
+                    : 'rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50'
+                }
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </nav>
+      </header>
+
+      <main className="mt-6">
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-200 px-5 py-4">
+            <div className="text-sm font-semibold text-slate-900">{tabs.find((x) => x.key === tab)?.label}</div>
+            <div className="mt-1 text-xs text-slate-500">等級會影響：用詞、語法點、練習難度與改寫策略。</div>
+          </div>
+
+          <div className="p-5">
+            {tab === 'generate' ? <ArticleGenerator level={level} /> : null}
+            {tab === 'practice' ? <PracticePanel level={level} /> : null}
+            {tab === 'search' ? <SearchPanel level={level} /> : null}
+            {tab === 'chat' ? <ChatPanel level={level} /> : null}
+            {tab === 'upload' ? <UploadRewritePanel level={level} /> : null}
+          </div>
+        </div>
+      </main>
+
+      <footer className="mt-6 text-xs text-slate-500">
+        ⚠️ 生成/改寫內容僅供教學參考；正式教材建議再人工審稿。
+      </footer>
+    </div>
+  );
+}
+```
+
+---
+
+## 17) ArticleGenerator / PracticePanel / SearchPanel / ChatPanel（✅ 已合併成最終一致版）
+
+以下四個檔案是「**已接 i18n + 雙語 UI + 雙語解析/回答 + 收藏匯出 + 文章高亮點擊卡片 + 錯題本地復習**」的最終版。
+
+> 直接把這四個檔案放進 `src/components/` 覆蓋即可。
+
+---
+
+### 17.1 `src/components/ArticleGenerator.tsx`
+
+```tsx
+'use client';
+
+import { useMemo, useState } from 'react';
+import type { UiLevelKey } from '@/lib/levels';
+import { coreLevelLabel, toCoreLevelNumber } from '@/lib/levels';
+import { useI18n } from '@/components/I18nProvider';
+
+type Analysis = {
+  title: string;
+  article: string;
+  levelLogic: string[];
+  grammar: { name: string; explanation: string; evidence?: string; examples: string[] }[];
+  vocab: { word: string; pinyin?: string; gloss?: string; examples: string[] }[];
+};
+
+type HitKind = 'grammar' | 'vocab';
+
+type Hit = {
+  kind: HitKind;
+  key: string;
+  start: number;
+  end: number;
+  label: string;
+  index: number; // index in corresponding array
+};
+
+type Segment = {
+  text: string;
+  hit?: Hit;
+};
+
+function uniq<T>(arr: T[]) {
+  return Array.from(new Set(arr));
+}
+
+function buildHits(article: string, res: Analysis): Hit[] {
+  const hits: Hit[] = [];
+
+  // 1) Grammar hits: use evidence snippets if available
+  const gPatterns = res.grammar
+    .map((g, idx) => ({
+      idx,
+      key: `g:${idx}:${g.name}`,
+      pattern: (g.evidence ?? '').trim(),
+      label: g.name,
+    }))
+    .filter((x) => x.pattern.length >= 2);
+
+  // 2) Vocab hits: use word itself
+  const vPatterns = res.vocab
+    .map((v, idx) => ({
+      idx,
+      key: `v:${idx}:${v.word}`,
+      pattern: v.word.trim(),
+      label: v.word,
+    }))
+    .filter((x) => x.pattern.length >= 1);
+
+  // Reduce over-highlighting: dedupe patterns
+  const all = [...gPatterns, ...vPatterns]
+    .filter((p) => p.pattern && p.pattern.length)
+    .sort((a, b) => b.pattern.length - a.pattern.length);
+
+  const seenPattern = new Set<string>();
+  const patterns = all.filter((p) => {
+    if (seenPattern.has(p.pattern)) return false;
+    seenPattern.add(p.pattern);
+    return true;
+  });
+
+  // Find all occurrences (simple exact match)
+  for (const p of patterns) {
+    let from = 0;
+    while (from < article.length) {
+      const at = article.indexOf(p.pattern, from);
+      if (at === -1) break;
+      const hit: Hit = {
+        kind: p.key.startsWith('g:') ? 'grammar' : 'vocab',
+        key: p.key,
+        start: at,
+        end: at + p.pattern.length,
+        label: p.label,
+        index: p.idx,
+      };
+      hits.push(hit);
+      from = at + p.pattern.length;
+      // Hard cap to avoid too many spans
+      if (hits.length > 120) break;
+    }
+    if (hits.length > 120) break;
+  }
+
+  // Resolve overlaps: sort by start then longer first; greedily accept
+  hits.sort((a, b) => (a.start !== b.start ? a.start - b.start : b.end - b.start - (a.end - a.start)));
+
+  const used = new Array(article.length).fill(false);
+  const accepted: Hit[] = [];
+  for (const h of hits) {
+    let ok = true;
+    for (let i = h.start; i < h.end; i++) {
+      if (used[i]) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) continue;
+    for (let i = h.start; i < h.end; i++) used[i] = true;
+    accepted.push(h);
+  }
+
+  return accepted;
+}
+
+function splitToSegments(text: string, hits: Hit[]): Segment[] {
+  if (!hits.length) return [{ text }];
+  const segs: Segment[] = [];
+  let cursor = 0;
+  for (const h of hits) {
+    if (h.start > cursor) segs.push({ text: text.slice(cursor, h.start) });
+    segs.push({ text: text.slice(h.start, h.end), hit: h });
+    cursor = h.end;
+  }
+  if (cursor < text.length) segs.push({ text: text.slice(cursor) });
+  return segs;
+}
+
+export function ArticleGenerator({ level }: { level: UiLevelKey }) {
+  const coreLevel = toCoreLevelNumber(level);
+  const { lang, tb } = useI18n();
+
+  const [topic, setTopic] = useState('在台灣生活：買東西與問路');
+  const [genre, setGenre] = useState<'narrative' | 'dialogue' | 'expository'>('narrative');
+  const [length, setLength] = useState<'short' | 'medium' | 'long'>('medium');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<Analysis | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [highlightOn, setHighlightOn] = useState(true);
+  const [selected, setSelected] = useState<Hit | null>(null);
+
+  const [bilingualExplainOn, setBilingualExplainOn] = useState(false);
+  const [bilingualText, setBilingualText] = useState<string>('');
+  const [translating, setTranslating] = useState(false);
+
+  const segments = useMemo(() => {
+    if (!result) return [{ text: '' }];
+    if (!highlightOn) return [{ text: result.article }];
+    const hits = buildHits(result.article, result);
+    return splitToSegments(result.article, hits);
+  }, [result, highlightOn]);
+
+  async function generate() {
+    setLoading(true);
+    setError(null);
+    setSelected(null);
+    setBilingualText('');
+
+    try {
+      const res = await fetch('/api/article/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uiLevel: level, coreLevel, topic, genre, length }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as Analysis;
+      setResult(data);
+    } catch (e: any) {
+      setError(e?.message ?? '生成失敗');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function translateBreakdown() {
+    if (!result) return;
+    setTranslating(true);
+    try {
+      const payload = {
+        levelLogic: result.levelLogic,
+        grammar: result.grammar,
+        vocab: result.vocab,
+      };
+
+      const msg =
+        `請把以下教學內容翻譯成「${lang}」，並用「中文 / 目標語言」雙行格式呈現，` +
+        `保留原本的條列結構（不要加入新內容）。
+
+` +
+        `內容：
+` +
+        JSON.stringify(payload, null, 2);
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uiLevel: level, coreLevel, message: msg, lang }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { answer: string };
+      setBilingualText(data.answer);
+    } catch (e: any) {
+      setBilingualText(`翻譯失敗：${e?.message ?? 'unknown'}`);
+    } finally {
+      setTranslating(false);
+    }
+  }
+
+  const selectedCard = useMemo(() => {
+    if (!result || !selected) return null;
+    if (selected.kind === 'grammar') {
+      const g = result.grammar[selected.index];
+      if (!g) return null;
+      return (
+        <div className="space-y-2">
+          <div className="text-base font-bold">{g.name}</div>
+          <div className="text-sm text-slate-700">{g.explanation}</div>
+          {g.evidence ? (
+            <div className="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+              <div className="text-xs font-semibold text-slate-500">文中出現</div>
+              <div className="mt-1">{g.evidence}</div>
+            </div>
+          ) : null}
+          <div className="text-xs font-semibold text-slate-600">例句</div>
+          <ul className="list-disc space-y-1 pl-5 text-sm text-slate-700">
+            {g.examples.map((ex, i) => (
+              <li key={i}>{ex}</li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
+
+    const v = result.vocab[selected.index];
+    if (!v) return null;
+    return (
+      <div className="space-y-2">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="text-base font-bold">{v.word}</div>
+          <div className="text-xs text-slate-500">{v.pinyin ?? ''}</div>
+        </div>
+        {v.gloss ? <div className="text-sm text-slate-700">{v.gloss}</div> : null}
+        <div className="text-xs font-semibold text-slate-600">例句</div>
+        <ul className="list-disc space-y-1 pl-5 text-sm text-slate-700">
+          {v.examples.map((ex, i) => (
+            <li key={i}>{ex}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }, [result, selected]);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-6">
+        <div className="md:col-span-3">
+          <label className="text-xs font-semibold text-slate-600">主題</label>
+          <input
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div className="md:col-span-1">
+          <label className="text-xs font-semibold text-slate-600">{tb('common.level')}</label>
+          <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+            TBCL {level} → <span className="font-semibold">{coreLevelLabel(coreLevel)}</span>
+          </div>
+        </div>
+
+        <div className="md:col-span-1">
+          <label className="text-xs font-semibold text-slate-600">文體</label>
+          <select
+            value={genre}
+            onChange={(e) => setGenre(e.target.value as any)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="narrative">敘事短文</option>
+            <option value="dialogue">對話</option>
+            <option value="expository">說明文</option>
+          </select>
+        </div>
+
+        <div className="md:col-span-1">
+          <label className="text-xs font-semibold text-slate-600">篇幅</label>
+          <select
+            value={length}
+            onChange={(e) => setLength(e.target.value as any)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="short">短</option>
+            <option value="medium">中</option>
+            <option value="long">長</option>
+          </select>
+        </div>
+
+        <div className="md:col-span-6 flex flex-wrap items-center gap-3">
+          <button
+            onClick={generate}
+            disabled={loading}
+            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-blue-700 disabled:opacity-60"
+          >
+            {loading ? '生成中…' : tb('common.generate')}
+          </button>
+
+          <label className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200">
+            <input type="checkbox" checked={highlightOn} onChange={(e) => setHighlightOn(e.target.checked)} />
+            文中標示
+          </label>
+
+          <label className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200">
+            <input
+              type="checkbox"
+              checked={bilingualExplainOn}
+              onChange={(e) => setBilingualExplainOn(e.target.checked)}
+            />
+            雙語解釋
+          </label>
+
+          {bilingualExplainOn ? (
+            <button
+              onClick={translateBreakdown}
+              disabled={!result || translating}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-slate-800 disabled:opacity-60"
+            >
+              {translating ? '翻譯中…' : `翻譯（${lang}）`}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>
+      ) : null}
+
+      {!result ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          點「生成」後，會回傳：文章 + 該等級語法/詞彙拆解 + 例句。
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <section className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-bold">{result.title}</div>
+                <div className="mt-1 text-xs text-slate-500">目標等級：{coreLevelLabel(coreLevel)}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                  onClick={() => navigator.clipboard.writeText(`${result.title}
+
+${result.article}`)}
+                >
+                  Copy Article
+                </button>
+                <button
+                  className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                  onClick={() => navigator.clipboard.writeText(JSON.stringify(result, null, 2))}
+                >
+                  Copy JSON
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-xl bg-slate-50 p-4 text-sm leading-7 text-slate-800">
+              {segments.map((s, i) => {
+                if (!s.hit) return <span key={i}>{s.text}</span>;
+                const cls =
+                  s.hit.kind === 'grammar'
+                    ? 'bg-amber-100 hover:bg-amber-200'
+                    : 'bg-emerald-100 hover:bg-emerald-200';
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    className={`rounded px-1 transition ${cls}`}
+                    onClick={() => setSelected(s.hit!)}
+                    title={s.hit.kind === 'grammar' ? `語法：${s.hit.label}` : `詞彙：${s.hit.label}`}
+                  >
+                    {s.text}
+                  </button>
+                );
+              })}
+            </div>
+
+            {selectedCard ? (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">快速卡片</div>
+                  <button
+                    className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                    onClick={() => setSelected(null)}
+                  >
+                    關閉
+                  </button>
+                </div>
+                <div className="mt-3">{selectedCard}</div>
+              </div>
+            ) : null}
+          </section>
+
+          <section className="grid gap-4 lg:grid-cols-3">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 lg:col-span-1">
+              <div className="text-sm font-semibold">這個等級的用法邏輯</div>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                {result.levelLogic.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 lg:col-span-2">
+              <div className="text-sm font-semibold">語法拆解（挑重點 + 造句）</div>
+              <div className="mt-3 space-y-3">
+                {result.grammar.map((g, idx) => (
+                  <div key={idx} className="rounded-xl bg-slate-50 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold">{g.name}</div>
+                      {g.evidence ? <div className="text-xs text-slate-500">出現：{g.evidence}</div> : null}
+                    </div>
+                    <div className="mt-1 text-sm text-slate-700">{g.explanation}</div>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                      {g.examples.map((ex, i) => (
+                        <li key={i}>{ex}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="text-sm font-semibold">常用詞彙（含簡解 + 造句）</div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              {result.vocab.map((v, idx) => (
+                <div key={idx} className="rounded-xl bg-slate-50 p-3">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <div className="text-base font-bold">{v.word}</div>
+                    <div className="text-xs text-slate-500">{v.pinyin ?? ''}</div>
+                  </div>
+                  {v.gloss ? <div className="mt-1 text-sm text-slate-700">{v.gloss}</div> : null}
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                    {v.examples.map((ex, i) => (
+                      <li key={i}>{ex}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {bilingualExplainOn && bilingualText ? (
+            <section className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold">雙語解釋（中文 / {lang}）</div>
+              <div className="mt-2 whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-sm leading-7 text-slate-800">
+                {bilingualText}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+### 17.2 `src/components/PracticePanel.tsx`
+
+```tsx
+'use client';
+
+import { useMemo, useState } from 'react';
+import type { UiLevelKey } from '@/lib/levels';
+import { coreLevelLabel, toCoreLevelNumber } from '@/lib/levels';
+import { useI18n } from '@/components/I18nProvider';
+
+type ClozeItem = {
+  prompt: string;
+  options: string[];
+  answer: string;
+  explanation: string;
+};
+
+const WRONG_KEY = 'tbcl_wrong_bank_v1';
+
+function loadWrongBank(): ClozeItem[] {
+  try {
+    const raw = localStorage.getItem(WRONG_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr as ClozeItem[];
+  } catch {
+    return [];
+  }
+}
+
+function saveWrongBank(items: ClozeItem[]) {
+  localStorage.setItem(WRONG_KEY, JSON.stringify(items.slice(0, 200)));
+}
+
+export function PracticePanel({ level }: { level: UiLevelKey }) {
+  const coreLevel = toCoreLevelNumber(level);
+  const { lang, tb } = useI18n();
+
+  const [mode, setMode] = useState<'mixed' | 'vocab' | 'grammar'>('mixed');
+  const [count, setCount] = useState(8);
+  const [weakMode, setWeakMode] = useState(false);
+
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<ClozeItem[]>([]);
+  const [picked, setPicked] = useState<Record<number, string>>({});
+  const [reveal, setReveal] = useState(false);
+
+  const [bilingualExplainOn, setBilingualExplainOn] = useState(false);
+  const [bilingualText, setBilingualText] = useState('');
+  const [translating, setTranslating] = useState(false);
+
+  const score = useMemo(() => {
+    if (!reveal) return null;
+    let s = 0;
+    items.forEach((it, idx) => {
+      if (picked[idx] === it.answer) s += 1;
+    });
+    return s;
+  }, [items, picked, reveal]);
+
+  async function generate() {
+    setLoading(true);
+    setReveal(false);
+    setPicked({});
+    setBilingualText('');
+
+    try {
+      const res = await fetch('/api/practice/cloze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uiLevel: level, coreLevel, mode, count, weakMode }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { items: ClozeItem[] };
+      setItems(data.items);
+    } catch (e: any) {
+      alert(e?.message ?? '生成失敗');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function revealAnswers() {
+    setReveal(true);
+
+    // 把錯題存到 wrong bank（本機）
+    const wrongNow: ClozeItem[] = [];
+    items.forEach((it, idx) => {
+      const p = picked[idx];
+      if (p && p !== it.answer) wrongNow.push(it);
+    });
+
+    if (wrongNow.length) {
+      const bank = loadWrongBank();
+      // 去重（用 prompt 作 key）
+      const merged = [...wrongNow, ...bank];
+      const map = new Map<string, ClozeItem>();
+      for (const it of merged) map.set(it.prompt, it);
+      saveWrongBank(Array.from(map.values()));
+    }
+  }
+
+  function loadWrongAsQuiz() {
+    const bank = loadWrongBank();
+    if (!bank.length) {
+      alert('目前沒有錯題。');
+      return;
+    }
+    setItems(bank.slice(0, Math.min(12, bank.length)));
+    setPicked({});
+    setReveal(false);
+    setBilingualText('');
+  }
+
+  async function translateExplanations() {
+    if (!items.length) return;
+    setTranslating(true);
+    try {
+      const msg =
+        `請把以下克漏字題的解析翻譯成「${lang}」，並用「中文 / 目標語言」雙行格式。` +
+        `只翻譯 explanation，不要改動題目或選項。
+
+` +
+        JSON.stringify(
+          items.map((it, i) => ({
+            no: i + 1,
+            prompt: it.prompt,
+            answer: it.answer,
+            explanation: it.explanation,
+          })),
+          null,
+          2
+        );
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uiLevel: level, coreLevel, message: msg, lang }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { answer: string };
+      setBilingualText(data.answer);
+    } catch (e: any) {
+      setBilingualText(`翻譯失敗：${e?.message ?? 'unknown'}`);
+    } finally {
+      setTranslating(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-6">
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-slate-600">{tb('common.action')}</label>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value as any)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="mixed">混合（詞彙+語法）</option>
+            <option value="vocab">詞彙</option>
+            <option value="grammar">語法</option>
+          </select>
+        </div>
+
+        <div className="md:col-span-1">
+          <label className="text-xs font-semibold text-slate-600">題數</label>
+          <input
+            type="number"
+            min={4}
+            max={20}
+            value={count}
+            onChange={(e) => setCount(Number(e.target.value))}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-slate-600">{tb('common.level')}</label>
+          <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+            TBCL {level} → <span className="font-semibold">{coreLevelLabel(coreLevel)}</span>
+          </div>
+        </div>
+
+        <div className="md:col-span-1 flex items-end">
+          <button
+            onClick={generate}
+            disabled={loading}
+            className="w-full rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-blue-700 disabled:opacity-60"
+          >
+            {loading ? '出題中…' : '出題'}
+          </button>
+        </div>
+
+        <div className="md:col-span-6 flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200">
+            <input type="checkbox" checked={weakMode} onChange={(e) => setWeakMode(e.target.checked)} />
+            弱點模式
+          </label>
+
+          <button
+            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-slate-800"
+            onClick={loadWrongAsQuiz}
+          >
+            復習錯題
+          </button>
+
+          <label className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200">
+            <input
+              type="checkbox"
+              checked={bilingualExplainOn}
+              onChange={(e) => setBilingualExplainOn(e.target.checked)}
+            />
+            雙語解析
+          </label>
+
+          {bilingualExplainOn ? (
+            <button
+              onClick={translateExplanations}
+              disabled={!items.length || translating}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-slate-800 disabled:opacity-60"
+            >
+              {translating ? '翻譯中…' : `翻譯（${lang}）`}
+            </button>
+          ) : null}
+
+          <button
+            className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+            onClick={() => {
+              localStorage.removeItem(WRONG_KEY);
+              alert('已清空錯題庫。');
+            }}
+          >
+            清空錯題庫
+          </button>
+        </div>
+      </div>
+
+      {items.length ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-slate-900">克漏字題</div>
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                onClick={() => (reveal ? setReveal(false) : revealAnswers())}
+              >
+                {reveal ? '收起答案' : '看答案'}
+              </button>
+              {reveal && score !== null ? (
+                <div className="rounded-lg bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">
+                  得分 {score}/{items.length}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {items.map((it, idx) => {
+            const chosen = picked[idx];
+            const correct = chosen === it.answer;
+
+            return (
+              <div key={idx} className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="text-sm font-semibold text-slate-900">
+                  {idx + 1}. <span className="whitespace-pre-wrap">{it.prompt}</span>
+                </div>
+
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {it.options.map((opt) => {
+                    const selected = chosen === opt;
+                    const showCorrect = reveal && opt === it.answer;
+                    const showWrong = reveal && selected && opt !== it.answer;
+
+                    return (
+                      <button
+                        key={opt}
+                        onClick={() => setPicked((p) => ({ ...p, [idx]: opt }))}
+                        className={
+                          'rounded-xl border px-3 py-2 text-left text-sm transition ' +
+                          (selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200 bg-white hover:bg-slate-50') +
+                          (showCorrect ? ' ring-2 ring-emerald-400' : '') +
+                          (showWrong ? ' ring-2 ring-rose-400' : '')
+                        }
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {reveal ? (
+                  <div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
+                    <div>
+                      正解：<span className="font-semibold">{it.answer}</span>
+                      {chosen ? (
+                        <span className={correct ? 'ml-2 text-emerald-700' : 'ml-2 text-rose-700'}>
+                          {correct ? '✓' : '✗'}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1">{it.explanation}</div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+
+          {bilingualExplainOn && bilingualText ? (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-semibold">雙語解析（中文 / {lang}）</div>
+              <div className="mt-2 whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-sm leading-7 text-slate-800">
+                {bilingualText}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          先按「出題」。弱點模式會讓題目更偏向常錯類型（若後端有接 log 或策略）。
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+### 17.3 `src/components/SearchPanel.tsx`
+
+```tsx
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import type { UiLevelKey } from '@/lib/levels';
+import { toCoreLevelNumber } from '@/lib/levels';
+import { useI18n } from '@/components/I18nProvider';
+
+type VocabRow = {
+  word: string;
+  pinyin?: string;
+  bopomofo?: string;
+  gloss?: string;
+  levelNum: number;
+  situation?: string;
+  wfreq?: number;
+  sfreq?: number;
+};
+
+type GrammarRow = {
+  name: string;
+  levelNum: number;
+  tier?: string;
+  description?: string;
+  example?: string;
+};
+
+type SavedItem =
+  | { type: 'vocab'; data: VocabRow }
+  | { type: 'grammar'; data: GrammarRow };
+
+const SAVE_KEY = 'tbcl_saved_v1';
+
+function loadSaved(): SavedItem[] {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr as SavedItem[];
+  } catch {
+    return [];
+  }
+}
+
+function saveSaved(items: SavedItem[]) {
+  localStorage.setItem(SAVE_KEY, JSON.stringify(items.slice(0, 500)));
+}
+
+function download(name: string, content: string, mime = 'application/json') {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function SearchPanel({ level }: { level: UiLevelKey }) {
+  const coreLevel = toCoreLevelNumber(level);
+  const { tb } = useI18n();
+
+  const [mode, setMode] = useState<'vocab' | 'grammar'>('vocab');
+  const [q, setQ] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [vocab, setVocab] = useState<VocabRow[]>([]);
+  const [grammar, setGrammar] = useState<GrammarRow[]>([]);
+
+  const [saved, setSaved] = useState<SavedItem[]>([]);
+
+  useEffect(() => {
+    setSaved(loadSaved());
+  }, []);
+
+  useEffect(() => {
+    void runSearch('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, level]);
+
+  const savedCount = saved.length;
+
+  function addSaved(item: SavedItem) {
+    const next = [item, ...saved];
+    // 去重：vocab 用 word；grammar 用 name
+    const map = new Map<string, SavedItem>();
+    for (const it of next) {
+      const key = it.type === 'vocab' ? `v:${it.data.word}` : `g:${it.data.name}`;
+      map.set(key, it);
+    }
+    const arr = Array.from(map.values());
+    setSaved(arr);
+    saveSaved(arr);
+  }
+
+  function removeSaved(item: SavedItem) {
+    const key = item.type === 'vocab' ? `v:${item.data.word}` : `g:${item.data.name}`;
+    const next = saved.filter((it) => (it.type === 'vocab' ? `v:${it.data.word}` : `g:${it.data.name}`) !== key);
+    setSaved(next);
+    saveSaved(next);
+  }
+
+  function exportJson() {
+    download('tbcl_saved.json', JSON.stringify(saved, null, 2));
+  }
+
+  function exportCsv() {
+    const rows: string[] = [];
+    rows.push(['type', 'name/word', 'level', 'pinyin', 'bopomofo', 'gloss/description', 'example'].join(','));
+    for (const it of saved) {
+      if (it.type === 'vocab') {
+        const v = it.data;
+        rows.push(
+          [
+            'vocab',
+            v.word,
+            String(v.levelNum),
+            v.pinyin ?? '',
+            v.bopomofo ?? '',
+            (v.gloss ?? '').replace(/
+/g, ' '),
+            '',
+          ]
+            .map((x) => `"${String(x).replace(/"/g, '""')}"`)
+            .join(',')
+        );
+      } else {
+        const g = it.data;
+        rows.push(
+          [
+            'grammar',
+            g.name,
+            String(g.levelNum),
+            '',
+            '',
+            (g.description ?? '').replace(/
+/g, ' '),
+            (g.example ?? '').replace(/
+/g, ' '),
+          ]
+            .map((x) => `"${String(x).replace(/"/g, '""')}"`)
+            .join(',')
+        );
+      }
+    }
+    download('tbcl_saved.csv', rows.join('
+'), 'text/csv');
+  }
+
+  async function runSearch(query: string) {
+    setLoading(true);
+    try {
+      if (mode === 'vocab') {
+        const url = new URL('/api/search/vocab', window.location.origin);
+        url.searchParams.set('q', query);
+        url.searchParams.set('coreLevel', String(coreLevel));
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as { items: VocabRow[] };
+        setVocab(data.items);
+      } else {
+        const url = new URL('/api/search/grammar', window.location.origin);
+        url.searchParams.set('q', query);
+        url.searchParams.set('coreLevel', String(coreLevel));
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as { items: GrammarRow[] };
+        setGrammar(data.items);
+      }
+    } catch (e: any) {
+      alert(e?.message ?? '查詢失敗');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const savedPanel = useMemo(() => {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-sm font-semibold">收藏（{savedCount}）</div>
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+              onClick={exportJson}
+            >
+              Export JSON
+            </button>
+            <button
+              className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+              onClick={exportCsv}
+            >
+              Export CSV
+            </button>
+            <button
+              className="rounded-lg bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+              onClick={() => {
+                if (!confirm('確定清空收藏？')) return;
+                setSaved([]);
+                saveSaved([]);
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        {!saved.length ? (
+          <div className="mt-3 text-sm text-slate-500">尚無收藏。查到詞/語法後點「收藏」即可。</div>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {saved.map((it, idx) => (
+              <div key={idx} className="rounded-xl bg-slate-50 p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-semibold">
+                      {it.type === 'vocab' ? it.data.word : it.data.name}
+                      <span className="ml-2 text-xs text-slate-500">({it.type})</span>
+                    </div>
+                    <div className="mt-1 text-xs text-slate-600">第{it.data.levelNum}級</div>
+                    {it.type === 'vocab' ? (
+                      <div className="mt-1 text-xs text-slate-600">{it.data.pinyin ?? ''} {it.data.bopomofo ? `(${it.data.bopomofo})` : ''}</div>
+                    ) : null}
+                    {it.type === 'vocab' && it.data.gloss ? (
+                      <div className="mt-1 text-sm text-slate-700">{it.data.gloss}</div>
+                    ) : null}
+                    {it.type === 'grammar' && it.data.example ? (
+                      <div className="mt-1 text-sm text-slate-700">例：{it.data.example}</div>
+                    ) : null}
+                  </div>
+                  <button
+                    className="rounded-lg bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50"
+                    onClick={() => removeSaved(it)}
+                  >
+                    移除
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }, [saved, savedCount]);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-6">
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-slate-600">查詢類型</label>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value as any)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="vocab">詞彙</option>
+            <option value="grammar">語法點</option>
+          </select>
+        </div>
+
+        <div className="md:col-span-4">
+          <label className="text-xs font-semibold text-slate-600">關鍵字</label>
+          <div className="mt-1 flex gap-2">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:bg-white focus:ring-2 focus:ring-blue-500"
+              placeholder={mode === 'vocab' ? '例如：愛 / ㄅㄚ / ai' : '例如：把字句 / 的 / 連詞…'}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void runSearch(q);
+                }
+              }}
+            />
+            <button
+              onClick={() => runSearch(q)}
+              disabled={loading}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-slate-800 disabled:opacity-60"
+            >
+              {loading ? '查…' : tb('common.search')}
+            </button>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">會優先回傳「不高於目前等級」的結果。</div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          {mode === 'vocab' ? (
+            <div className="overflow-hidden rounded-2xl border border-slate-200">
+              <div className="grid grid-cols-12 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-600">
+                <div className="col-span-3">詞</div>
+                <div className="col-span-3">拼音/注音</div>
+                <div className="col-span-2">級</div>
+                <div className="col-span-2">釋義</div>
+                <div className="col-span-2">操作</div>
+              </div>
+              <div className="divide-y divide-slate-200 bg-white">
+                {vocab.map((it, idx) => (
+                  <div key={idx} className="grid grid-cols-12 items-center px-4 py-2 text-sm">
+                    <div className="col-span-3 font-semibold">{it.word}</div>
+                    <div className="col-span-3 text-slate-700">
+                      {it.pinyin ?? ''} {it.bopomofo ? `(${it.bopomofo})` : ''}
+                    </div>
+                    <div className="col-span-2 text-slate-600">第{it.levelNum}級</div>
+                    <div className="col-span-2 text-slate-600 line-clamp-2">{it.gloss ?? ''}</div>
+                    <div className="col-span-2">
+                      <button
+                        className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                        onClick={() => addSaved({ type: 'vocab', data: it })}
+                      >
+                        收藏
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {!vocab.length ? (
+                  <div className="px-4 py-6 text-center text-sm text-slate-500">沒有結果（或資料尚未 seed）。</div>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {grammar.map((g, idx) => (
+                <div key={idx} className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-base font-bold">{g.name}</div>
+                      <div className="mt-1 text-xs text-slate-500">第{g.levelNum}級 {g.tier ? `· ${g.tier}` : ''}</div>
+                    </div>
+                    <button
+                      className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                      onClick={() => addSaved({ type: 'grammar', data: g })}
+                    >
+                      收藏
+                    </button>
+                  </div>
+
+                  {g.description ? (
+                    <div className="mt-2 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">{g.description}</div>
+                  ) : null}
+                  {g.example ? (
+                    <div className="mt-2 rounded-xl bg-slate-50 p-3 text-sm text-slate-700">例句：{g.example}</div>
+                  ) : null}
+                </div>
+              ))}
+              {!grammar.length ? (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                  沒有結果（或資料尚未 seed）。
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        <div className="lg:col-span-1">{savedPanel}</div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### 17.4 `src/components/ChatPanel.tsx`
+
+```tsx
+'use client';
+
+import { useMemo, useRef, useState } from 'react';
+import type { UiLevelKey } from '@/lib/levels';
+import { toCoreLevelNumber, coreLevelLabel } from '@/lib/levels';
+import { useI18n } from '@/components/I18nProvider';
+
+type Msg = { role: 'user' | 'assistant'; text: string };
+
+export function ChatPanel({ level }: { level: UiLevelKey }) {
+  const coreLevel = toCoreLevelNumber(level);
+  const { lang } = useI18n();
+
+  const [bilingualAnswer, setBilingualAnswer] = useState(true);
+  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<Msg[]>([
+    {
+      role: 'assistant',
+      text:
+        `我是你的華語教學助理。你可以：
+` +
+        `- 貼一段文章，叫我「標出第${coreLevel}級以內的詞彙/語法點」
+` +
+        `- 叫我把同一句改寫成更簡單或更進階
+` +
+        `- 要我出 5 題小測驗（選擇題/克漏字/改錯）
+
+` +
+        `先丟一句你要處理的文本就行。`,
+    },
+  ]);
+  const [loading, setLoading] = useState(false);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  const quick = useMemo(
+    () => [
+      { label: '標註詞彙/語法', text: `請標出這段文本中「第${coreLevel}級以內」的常用詞彙與語法點，並簡短解釋。
+
+` },
+      { label: '簡化', text: `請把下面句子簡化到第${coreLevel}級，意思不變：
+
+` },
+      { label: '進階改寫', text: `請把下面句子改寫得更自然、較進階，但仍不超過第${coreLevel}級：
+
+` },
+      { label: '出 5 題練習', text: `請針對下面內容出 5 題練習題（含答案與解析），題型混合：選擇題/克漏字/改錯：
+
+` },
+    ],
+    [coreLevel]
+  );
+
+  async function send(textOverride?: string) {
+    const text = (textOverride ?? input).trim();
+    if (!text || loading) return;
+
+    setMessages((m) => [...m, { role: 'user', text }]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uiLevel: level,
+          coreLevel,
+          message: text,
+          lang: bilingualAnswer ? lang : null,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { answer: string };
+      setMessages((m) => [...m, { role: 'assistant', text: data.answer }]);
+
+      setTimeout(() => {
+        boxRef.current?.scrollTo({ top: boxRef.current.scrollHeight, behavior: 'smooth' });
+      }, 0);
+    } catch (e: any) {
+      setMessages((m) => [...m, { role: 'assistant', text: `抱歉，我這邊回應失敗：${e?.message ?? 'unknown'}` }]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        <div>
+          當前等級：<span className="font-semibold">{coreLevelLabel(coreLevel)}</span>
+          <span className="ml-2 text-xs text-slate-500">（我會盡量用這個等級的詞彙與句型）</span>
+        </div>
+        <label className="flex items-center gap-2 rounded-full bg-white px-3 py-2 text-xs font-semibold shadow-sm ring-1 ring-slate-200">
+          <input type="checkbox" checked={bilingualAnswer} onChange={(e) => setBilingualAnswer(e.target.checked)} />
+          雙語回答（中文 / {lang}）
+        </label>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {quick.map((q) => (
+          <button
+            key={q.label}
+            className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50"
+            onClick={() => setInput(q.text)}
+          >
+            {q.label}
+          </button>
+        ))}
+      </div>
+
+      <div ref={boxRef} className="h-[420px] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="space-y-3">
+          {messages.map((m, idx) => (
+            <div
+              key={idx}
+              className={
+                'max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-7 ' +
+                (m.role === 'user' ? 'ml-auto bg-blue-600 text-white' : 'bg-slate-50 text-slate-800')
+              }
+            >
+              {m.text}
+            </div>
+          ))}
+          {loading ? (
+            <div className="max-w-[85%] rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-500">思考中…</div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          rows={2}
+          className="w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+          placeholder="輸入訊息（Enter 送出 / Shift+Enter 換行）"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+        />
+        <button
+          onClick={() => send()}
+          disabled={loading}
+          className="h-[54px] shrink-0 rounded-2xl bg-blue-600 px-4 text-sm font-semibold text-white shadow hover:bg-blue-700 disabled:opacity-60"
+        >
+          送出
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 18) 快速啟動
+
+```bash
+pnpm i
+pnpm db:generate
+pnpm db:migrate
+pnpm db:seed
+pnpm dev
+```
+
+---
+
+## 18) 快速啟動
+
+```bash
+pnpm i
+pnpm db:generate
+pnpm db:migrate
+pnpm db:seed
+pnpm dev
+```
+
+---
+
+## 19) 上傳改寫 API 使用方式（給你測試用）
+
+```bash
+curl -X POST http://localhost:3000/api/text/rewrite \
+  -F file=@"./sample.docx" \
+  -F uiLevel=2+ \
+  -F coreLevel=2 \
+  -F action=simplify \
+  -F lang=en
+```
 
