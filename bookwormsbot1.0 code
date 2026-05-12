@@ -4,7 +4,7 @@
  */
 
 // Global constant for Gemini API (The environment provides the key at runtime)
-const API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || "AIzaSyAmlVuNzvB8wbaYKw8Ufd7Xadsa3Qu6o0k"; 
+const API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || "GEMINI_API_KEY"; 
 
 // Google Drive Folder ID provided
 const FOLDER_ID = "1UvO24jV8zycT-pYw4OGA9tPlcMZjmHpg";
